@@ -1,0 +1,40 @@
+import mongoose from 'mongoose';
+
+const propertySchema = new mongoose.Schema({
+  title: { type: String, required: true },
+  description: { type: String, default: '' },
+  propertyType: { type: String, default: 'House' },
+  type: { type: String, default: 'House' },
+  category: { type: String, default: 'House' },
+  purpose: { type: String, default: 'Sale' },
+  transactionType: { type: String, default: 'Sale' },
+  price: { type: Number, default: 0 },
+  rent: { type: Number, default: 0 },
+  salePrice: { type: Number, default: 0 },
+  location: { type: String, default: '' },
+  city: { type: String, default: '' },
+  address: { type: String, default: '' },
+  bedrooms: { type: Number, default: 0 },
+  bathrooms: { type: Number, default: 0 },
+  area: { type: Number, default: 0 },
+  furnished: { type: String, default: '' },
+  amenities: { type: [String], default: [] },
+  ownerId: { type: String, default: '' },
+  ownerName: { type: String, default: '' },
+  managerName: { type: String, default: '' },
+  images: { type: [String], default: [] },
+  image: { type: String, default: '' },
+  status: { type: String, default: 'Available' },
+  availability: { type: String, default: 'Available' },
+  offer: {
+    type: mongoose.Schema.Types.Mixed,
+    default: null,
+  },
+  offerEnabled: { type: Boolean, default: false },
+  discountPercent: { type: Number, default: 0 },
+  isFeatured: { type: Boolean, default: false },
+  createdAt: { type: Date, default: Date.now },
+  updatedAt: { type: Date, default: Date.now },
+}, { timestamps: false });
+
+export default mongoose.model('Property', propertySchema, 'properties');
