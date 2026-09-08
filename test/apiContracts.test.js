@@ -1,5 +1,9 @@
 import test from 'node:test';
 import assert from 'node:assert/strict';
+import { connectDatabase } from '../src/config/database.js';
+
+// Ensure database is connected for controller tests (uses in-memory fallback)
+await connectDatabase();
 
 import { createRentRecord, listRentRecords } from '../src/controllers/rentController.js';
 import { createMaintenanceRequest, listMaintenanceRequests } from '../src/controllers/maintenanceController.js';

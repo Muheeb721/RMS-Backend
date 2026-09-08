@@ -24,6 +24,8 @@ const propertySchema = new mongoose.Schema({
   managerName: { type: String, default: '' },
   images: { type: [String], default: [] },
   image: { type: String, default: '' },
+  videos: { type: [String], default: [] },
+  media3d: { type: [String], default: [] },
   status: { type: String, default: 'Available' },
   availability: { type: String, default: 'Available' },
   offer: {

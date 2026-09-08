@@ -7,8 +7,7 @@ export const createBooking = async (req, res) => {
   try {
     const body = req.body || {};
     const user = req.user || {};
-    if (!user || !user.id) return res.status(401).json({ success: false, message: 'Authentication required.' });
-
+    const effectiveUserId = String(body.userId || user.id || `guest-${Date.now()}`).trim();
     const bookingStatus = body.bookingStatus || body.status || 'Pending';
     const paymentStatus = body.paymentStatus || 'Pending';
     const propertyId = body.propertyId || body.property?.id || '';
@@ -16,13 +15,13 @@ export const createBooking = async (req, res) => {
     const propertyTitle = body.propertyTitle || propertyName || '';
     const propertyType = body.propertyType || body.type || body.property?.type || '';
     const amount = Number(body.amount || body.rent || body.totalAmount || 0);
-    const userName = body.customerName || body.userName || user.name || '';
+    const userName = body.customerName || body.userName || user.name || body.fullName || 'Guest User';
     const userEmail = body.userEmail || body.email || user.email || '';
     const userPhone = body.userPhone || body.phone || body.customerPhone || '';
 
     const booking = await Booking.create({
-      userId: user.id,
-      userName: userName,
+      userId: effectiveUserId,
+      userName,
       userEmail,
       userPhone,
       customerName: userName,

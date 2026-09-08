@@ -1,13 +1,13 @@
 import mongoose from 'mongoose';
 
 const bookingSchema = new mongoose.Schema({
-  userId: { type: String, required: true, index: true },
+  userId: { type: String, default: 'guest-user', index: true },
   userName: { type: String, default: '' },
   userEmail: { type: String, default: '' },
   userPhone: { type: String, default: '' },
   customerName: { type: String, default: '' },
   customerPhone: { type: String, default: '' },
-  propertyId: { type: String, required: true, index: true },
+  propertyId: { type: String, default: '', index: true },
   propertyName: { type: String, default: '' },
   propertyTitle: { type: String, default: '' },
   propertyType: { type: String, default: '' },

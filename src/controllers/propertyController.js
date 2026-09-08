@@ -130,6 +130,8 @@ export const createProperty = async (req, res) => {
       rent: Number(input.rent || 0),
       images: Array.isArray(input.images) ? input.images : input.image ? [input.image] : [],
       image: input.image || (Array.isArray(input.images) ? input.images[0] : ''),
+      videos: Array.isArray(input.videos) ? input.videos : input.video ? [input.video] : [],
+      media3d: Array.isArray(input.media3d) ? input.media3d : input.model3d ? [input.model3d] : [],
       updatedAt: new Date(),
       createdAt: new Date(),
     };
@@ -224,6 +226,9 @@ export const updateProperty = async (req, res) => {
         finalPrice: calculateOfferPrice(updates.price || updates.salePrice || 0, updates.discountPercent),
       };
     }
+    // ensure arrays for new media fields when provided
+    if (updates.videos && !Array.isArray(updates.videos)) updates.videos = [updates.videos];
+    if (updates.media3d && !Array.isArray(updates.media3d)) updates.media3d = [updates.media3d];
     updates.updatedAt = new Date();
 
     const prop = await Property.findByIdAndUpdate(id, updates, { new: true }).lean();

@@ -1,11 +1,13 @@
 import 'dotenv/config';
 import express from 'express';
 import cors from 'cors';
+import path from 'path';
 import {createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const morgan = require('morgan');
 import bcrypt from 'bcryptjs';
 import { connectDatabase } from './config/database.js';
+import { seedDemoIfMissing } from './utils/demoSeeder.js';
 import { requireAdmin, requireAuth } from './middleware/auth.js';
 import User from './models/User.js';
 import UserNotification from './models/UserNotification.js';
@@ -24,6 +26,7 @@ import favoriteRoutes from './routes/favorites.js';
 import savedSearchRoutes from './routes/saved-searches.js';
 import notificationRoutes from './routes/notifications.js';
 import contactRoutes from './routes/contact.js';
+import propertyInquiryRoutes from './routes/property-inquiries.js';
 import userRoutes from './routes/users.js';
 import analyticsRoutes from './routes/analytics.js';
 import propertyVerificationRoutes from './routes/property-verification.js';
@@ -63,6 +66,9 @@ const ensureDefaultAdmin = async () => {
 // Allow dynamic origin reflection in dev so Vite's port changes don't break CORS
 app.use(cors({ origin: (origin, callback) => callback(null, true), credentials: true }));
 app.use(express.json());
+// serve demo/static images from Backend/public/images (used by demo seed)
+const imagesDir = path.join(process.cwd(), 'Backend', 'public', 'images');
+app.use('/images', express.static(imagesDir));
 app.use(morgan('dev'));
 
 // mount api routers
@@ -76,6 +82,7 @@ app.use('/api/favorites', favoriteRoutes);
 app.use('/api/saved-searches', savedSearchRoutes);
 app.use('/api/notifications', notificationRoutes);
 app.use('/api/contact', contactRoutes);
+app.use('/api/property-inquiries', propertyInquiryRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/admin', adminRoutes);
 app.use('/api/chatbot', chatbotRoutes);
@@ -298,6 +305,11 @@ const startServer = async () => {
   try {
     await connectDatabase();
     await ensureDefaultAdmin();
+    try {
+      await seedDemoIfMissing();
+    } catch (e) {
+      console.warn('Demo seeder failed', e?.message || e);
+    }
     app.listen(PORT, () => {
       console.log(`RMS backend listening on http://localhost:${PORT}`);
     });
