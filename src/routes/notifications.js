@@ -13,6 +13,7 @@ router.delete('/:id', requireAuth, deleteNotification);
 
 // Admin endpoints
 router.get('/admin/all', requireAuth, requireAdmin, listAdminNotifications);
-router.post('/create', requireAuth, requireAdmin, createNotification);
+// Shared notification store: user-side actions also write here so admin can mirror the same notifications.
+router.post('/create', requireAuth, createNotification);
 
 export default router;

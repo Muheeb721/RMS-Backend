@@ -8,6 +8,8 @@ await connectDatabase();
 import { createRentRecord, listRentRecords } from '../src/controllers/rentController.js';
 import { createMaintenanceRequest, listMaintenanceRequests } from '../src/controllers/maintenanceController.js';
 import { updatePaymentStatus } from '../src/controllers/paymentController.js';
+import { createRentalProfile } from '../src/controllers/rentalController.js';
+import { createNotification } from '../src/controllers/notificationController.js';
 
 const makeRes = () => {
   const res = {};
@@ -71,6 +73,35 @@ test('payment status updates support approve and reject actions', async () => {
   assert.equal(res.payload.data.status, 'Approved');
 });
 
+test('tenant profiles can be created without a profile image when core tenant data is present', async () => {
+  const req = {
+    user: { id: 'u-rental-1', name: 'Rental User', email: 'rent@example.com' },
+    body: {
+      fullName: 'Rental User',
+      email: 'rent@example.com',
+      phone: '+923001234567',
+      currentAddress: 'Block A, Gulshan, Karachi',
+      city: 'Karachi',
+      occupation: 'Software Engineer',
+      emergencyContactName: 'Ali User',
+      emergencyContactPhone: '+923001234568',
+      propertyId: 'p-rent-1',
+      propertyName: 'Sky Residences',
+      propertyType: 'Apartment',
+      status: 'Pending',
+      profileStatus: 'Profile Complete',
+    },
+  };
+
+  const res = makeRes();
+  await createRentalProfile(req, res);
+
+  assert.equal(res.code, 201);
+  assert.equal(res.payload.success, true);
+  assert.equal(res.payload.data.userId, 'u-rental-1');
+  assert.equal(res.payload.data.profileStatus, 'Profile Complete');
+});
+
 test('booking and payment payloads keep the real frontend fields required by RMS', async () => {
   const bookingReq = {
     user: { id: 'u-2', name: 'Jane Doe', email: 'jane@example.com' },
@@ -124,4 +155,26 @@ test('booking and payment payloads keep the real frontend fields required by RMS
   assert.equal(paymentRes.payload.success, true);
   assert.equal(paymentRes.payload.data.propertyName, 'Garden Residency');
   assert.equal(paymentRes.payload.data.status, 'Approved');
+});
+
+test('authenticated users can create notifications without sending a userId in the payload', async () => {
+  const req = {
+    user: { id: 'user-portal-1', name: 'Portal User', email: 'portal@example.com' },
+    body: {
+      title: 'Booking Confirmed',
+      message: 'Your booking has been confirmed.',
+      entityType: 'BOOKING',
+      actionType: 'BOOKING_CONFIRMED',
+      status: 'Notice',
+    },
+  };
+
+  const res = makeRes();
+  await createNotification(req, res);
+
+  assert.equal(res.code, 201);
+  assert.equal(res.payload.success, true);
+  assert.equal(res.payload.data.userId, 'user-portal-1');
+  assert.equal(res.payload.data.userName, 'Portal User');
+  assert.equal(res.payload.data.title, 'Booking Confirmed');
 });

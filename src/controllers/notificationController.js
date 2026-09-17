@@ -62,12 +62,19 @@ export const markAllAsRead = async (req, res) => {
 export const createNotification = async (req, res) => {
   try {
     const payload = req.body || {};
-    if (!payload.userId) return res.status(400).json({ success: false, message: 'userId is required.' });
+    const user = req.user || {};
+    const resolvedUserId = payload.userId || user.id || user._id || user.email || '';
+    const resolvedUserName = payload.userName || user.name || user.email || 'RMS User';
+
+    if (!resolvedUserId) {
+      return res.status(400).json({ success: false, message: 'userId is required.' });
+    }
+
     const note = await UserNotification.create({
-      userId: payload.userId,
-      userName: payload.userName || '',
-      actorType: payload.actorType || 'system',
-      actorName: payload.actorName || 'System',
+      userId: resolvedUserId,
+      userName: resolvedUserName,
+      actorType: payload.actorType || user.role || 'system',
+      actorName: payload.actorName || user.name || 'System',
       entityType: String(payload.entityType || 'GENERAL').toUpperCase(),
       entityId: payload.entityId || '',
       actionType: String(payload.actionType || 'SYSTEM').toUpperCase(),

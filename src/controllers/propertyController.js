@@ -1,4 +1,31 @@
+import fs from 'fs';
+import path from 'path';
 import Property from '../models/Property.js';
+
+const getStoredImagePath = (imageUrl) => {
+  if (!imageUrl || typeof imageUrl !== 'string') return null;
+  const clean = imageUrl.replace(/^\/+/, '').replace(/^[A-Za-z]+:\/\//, '');
+  if (!clean || !clean.startsWith('images/')) return null;
+  return path.join(process.cwd(), 'Backend', 'public', clean);
+};
+
+const deletePropertyMediaFiles = async (property) => {
+  if (!property) return;
+  const candidates = [];
+
+  if (property.image) candidates.push(property.image);
+  if (Array.isArray(property.images)) candidates.push(...property.images);
+
+  for (const imageUrl of candidates) {
+    const filePath = getStoredImagePath(imageUrl);
+    if (!filePath) continue;
+    try {
+      if (fs.existsSync(filePath)) fs.unlinkSync(filePath);
+    } catch (error) {
+      console.warn('Unable to remove property image file:', error?.message || error);
+    }
+  }
+};
 
 // --- Recommendation helpers (deterministic, same priorities as frontend)
 const normalizeText = (v) => (typeof v === 'string' ? v.toLowerCase().trim() : '');
@@ -243,9 +270,13 @@ export const updateProperty = async (req, res) => {
 export const deleteProperty = async (req, res) => {
   try {
     const { id } = req.params;
-    const prop = await Property.findByIdAndDelete(id).lean();
+    const prop = await Property.findById(id).lean();
     if (!prop) return res.status(404).json({ success: false, message: 'Property not found.' });
-    return res.json({ success: true, data: prop });
+
+    await deletePropertyMediaFiles(prop);
+    const deleted = await Property.findByIdAndDelete(id).lean();
+    if (!deleted) return res.status(404).json({ success: false, message: 'Property not found.' });
+    return res.json({ success: true, data: deleted });
   } catch (error) {
     console.error('Delete property failed', error);
     return res.status(500).json({ success: false, message: 'Unable to delete property.' });

@@ -1,9 +1,30 @@
 import User from '../models/User.js';
 
+// helper: resolve user by id or email to support dev sessions that provide email
+const resolveUser = async (userRef) => {
+  if (!userRef) return null;
+  const { id, email } = userRef;
+  try {
+    if (id) {
+      const byId = await User.findById(id).select('-passwordHash').lean();
+      if (byId) return byId;
+    }
+  } catch (e) {
+    // ignore cast errors and fallback to email lookup
+  }
+
+  if (email) {
+    const byEmail = await User.findOne({ email: String(email).trim().toLowerCase() }).select('-passwordHash').lean();
+    if (byEmail) return byEmail;
+  }
+
+  return null;
+};
+
 export const getProfile = async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
-    const user = await User.findById(req.user.id).select('-passwordHash').lean();
+    const user = await resolveUser(req.user);
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
     return res.json({ success: true, data: user });
   } catch (error) {
@@ -21,8 +42,7 @@ export const updateProfile = async (req, res) => {
     // prevent updating role or password via this endpoint
     delete profileUpdate.role;
     delete profileUpdate.passwordHash;
-
-    const existing = await User.findById(req.user.id).lean();
+    const existing = await resolveUser(req.user);
     if (!existing) return res.status(404).json({ success: false, message: 'User not found.' });
 
     const mergedProfile = {
@@ -30,7 +50,7 @@ export const updateProfile = async (req, res) => {
       ...profileUpdate,
     };
 
-    const user = await User.findByIdAndUpdate(req.user.id, { profile: mergedProfile }, { new: true }).select('-passwordHash').lean();
+    const user = await User.findByIdAndUpdate(existing._id, { profile: mergedProfile }, { new: true }).select('-passwordHash').lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
     return res.json({ success: true, data: user });
   } catch (error) {

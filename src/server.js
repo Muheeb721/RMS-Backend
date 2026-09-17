@@ -29,13 +29,28 @@ import contactRoutes from './routes/contact.js';
 import propertyInquiryRoutes from './routes/property-inquiries.js';
 import userRoutes from './routes/users.js';
 import analyticsRoutes from './routes/analytics.js';
+import reviewsRoutes from './routes/reviews.js';
 import propertyVerificationRoutes from './routes/property-verification.js';
+import areasRoutes from './routes/areas.js';
+import rentalRoutes from './routes/rentals.js';
+import imageRoutes from './routes/images.js';
 
 import chatbotRoutes from './routes/chatbotroutes.js';
 import adminRoutes from './routes/admin.js';
 
 const app = express();
-const PORT = process.env.PORT || 5000;
+const DEFAULT_PORT = 5000;
+const configuredPort = Number.parseInt(process.env.PORT || '', 10);
+const START_PORT = Number.isInteger(configuredPort) && configuredPort > 0 ? configuredPort : DEFAULT_PORT;
+
+// Global error handlers to assist in debugging startup crashes
+process.on('uncaughtException', (err) => {
+  console.error('Uncaught exception:', err && err.stack ? err.stack : err);
+});
+
+process.on('unhandledRejection', (reason) => {
+  console.error('Unhandled promise rejection at startup:', reason);
+});
 
 const ensureDefaultAdmin = async () => {
   const adminEmail = 'admin@rms.com';
@@ -63,9 +78,49 @@ const ensureDefaultAdmin = async () => {
   }
 };
 
-// Allow dynamic origin reflection in dev so Vite's port changes don't break CORS
-app.use(cors({ origin: (origin, callback) => callback(null, true), credentials: true }));
+const allowedOrigins = [
+  'http://localhost:5173',
+  'http://localhost:5174',
+  'http://localhost:5175',
+  'http://localhost:5176',
+  'http://localhost:5177',
+  'http://localhost:5178',
+  'http://localhost:4173',
+  'http://127.0.0.1:5173',
+  'http://127.0.0.1:5174',
+  'http://127.0.0.1:5175',
+  'http://127.0.0.1:5176',
+  'http://127.0.0.1:5177',
+  'http://127.0.0.1:5178',
+  'http://127.0.0.1:4173',
+];
+
+const isAllowedOrigin = (origin) => {
+  if (!origin) return true;
+  if (allowedOrigins.includes(origin)) return true;
+
+  const localhostMatch = /^http:\/\/localhost:(517[3-9]|518\d)\/?$/.test(origin);
+  const localMatch = /^http:\/\/127\.0\.0\.1:(517[3-9]|518\d)\/?$/.test(origin);
+  return localhostMatch || localMatch;
+};
+
+const corsOptions = {
+  origin: (origin, callback) => {
+    if (isAllowedOrigin(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`CORS blocked for origin: ${origin}`));
+  },
+  credentials: true,
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'x-rms-session', 'X-Requested-With'],
+};
+
 app.use(express.json());
+app.use(cors(corsOptions));
+app.options('*', cors(corsOptions));
 // serve demo/static images from Backend/public/images (used by demo seed)
 const imagesDir = path.join(process.cwd(), 'Backend', 'public', 'images');
 app.use('/images', express.static(imagesDir));
@@ -89,6 +144,13 @@ app.use('/api/chatbot', chatbotRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/about', aboutRoutes);
 app.use('/api/property-verification', propertyVerificationRoutes);
+app.use('/api/areas', areasRoutes);
+app.use('/api/rental-profiles', rentalRoutes);
+app.use('/api/tenant-profile', rentalRoutes);
+app.use('/api/tenant-profiles', rentalRoutes);
+app.use('/api/rent-bookings', bookingRoutes);
+app.use('/api/images', imageRoutes);
+app.use('/api/reviews', reviewsRoutes);
 
 app.get('/api/health', (req, res) => {
   res.json({ success: true, message: 'RMS backend is running.' });
@@ -310,9 +372,28 @@ const startServer = async () => {
     } catch (e) {
       console.warn('Demo seeder failed', e?.message || e);
     }
-    app.listen(PORT, () => {
-      console.log(`RMS backend listening on http://localhost:${PORT}`);
-    });
+
+    const candidatePorts = Array.from({ length: 10 }, (_, index) => START_PORT + index);
+
+    const listenOnPort = (portIndex = 0) => {
+      const port = candidatePorts[portIndex];
+      const server = app.listen(port, () => {
+        console.log(`RMS backend listening on http://localhost:${port}`);
+      });
+
+      server.on('error', (error) => {
+        if (error.code === 'EADDRINUSE' && portIndex < candidatePorts.length - 1) {
+          console.warn(`Port ${port} is already in use. Retrying on http://localhost:${candidatePorts[portIndex + 1]}`);
+          listenOnPort(portIndex + 1);
+          return;
+        }
+
+        console.error(`Failed to start backend on port ${port}:`, error.message || error);
+        process.exit(1);
+      });
+    };
+
+    listenOnPort();
   } catch (error) {
     console.error('Failed to start backend:', error);
     process.exit(1);

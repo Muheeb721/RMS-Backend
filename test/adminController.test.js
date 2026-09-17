@@ -28,3 +28,24 @@ test('buildDashboardSummary returns totals and recent activity from Mongo-like r
   assert.equal(summary.pendingPayments, 1);
   assert.equal(summary.recentActivity.length, 2);
 });
+
+test('buildDashboardSummary includes rent and maintenance risk metrics', () => {
+  const summary = buildDashboardSummary({
+    properties: [{ status: 'Available' }],
+    users: [{ _id: 'u1', name: 'A', email: 'a@test.com' }],
+    bookings: [{ status: 'Approved' }],
+    payments: [{ status: 'Paid', amount: 100 }],
+    rentRecords: [
+      { _id: 'r1', userName: 'A', monthlyRent: 600, paid: 300, status: 'Pending' },
+      { _id: 'r2', userName: 'A', monthlyRent: 400, paid: 400, status: 'Paid' },
+    ],
+    maintenance: [
+      { _id: 'm1', title: 'Leak', status: 'Open' },
+      { _id: 'm2', title: 'Paint', status: 'Resolved' },
+    ],
+    activity: [{ message: 'Portal sync', createdAt: '2025-01-02T00:00:00.000Z' }],
+  });
+
+  assert.equal(summary.outstandingDues, 300);
+  assert.equal(summary.openMaintenance, 1);
+});

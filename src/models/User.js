@@ -10,6 +10,8 @@ const userSchema = new mongoose.Schema({
   phone: { type: String, default: '' },
   profileImage: { type: String, default: '' },
   profile: { type: Object, default: {} },
+  status: { type: String, default: 'Active' },
+  archived: { type: Boolean, default: false },
   createdAt: { type: Date, default: Date.now },
   updatedAt: { type: Date, default: Date.now },
 }, { timestamps: false });
