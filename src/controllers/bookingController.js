@@ -72,6 +72,10 @@ export const createBooking = async (req, res) => {
       status: bookingStatus,
       bookingDate: body.bookingDate ? new Date(body.bookingDate) : new Date(),
       visitDate: body.visitDate ? new Date(body.visitDate) : null,
+      // flow type and uploaded images
+      flowType: body.flowType || (propertyType === 'Flat' || String(propertyType).toLowerCase() === 'flat' ? 'rent_application' : 'contact'),
+      profileImage: body.profileImage || (user && user.profile ? user.profile.profileImage || user.profileImage || '' : ''),
+      cnicImage: body.cnicImage || (user && user.profile ? user.profile.cnicImage || '' : ''),
     });
 
     try {
@@ -156,10 +160,10 @@ export const approveBooking = async (req, res) => {
     booking.paymentStatus = booking.paymentStatus || 'Approved';
     await booking.save();
 
-    // update property status to Reserved when a booking is approved
+    // update property status to Booked when a booking is approved
     try {
       if (booking.propertyId) {
-        await Property.findOneAndUpdate({ _id: booking.propertyId }, { status: 'Reserved', availability: 'Reserved' });
+        await Property.findOneAndUpdate({ _id: booking.propertyId }, { status: 'Booked', availability: 'Booked' });
       }
     } catch (e) {
       console.warn('Unable to update property status on booking approve', e && e.message ? e.message : e);
@@ -253,6 +257,15 @@ export const rejectBooking = async (req, res) => {
     booking.bookingStatus = 'Rejected';
     booking.paymentStatus = booking.paymentStatus || 'Pending';
     await booking.save();
+
+    // ensure property remains available on rejection
+    try {
+      if (booking.propertyId) {
+        await Property.findOneAndUpdate({ _id: booking.propertyId }, { status: 'Available', availability: 'Available' });
+      }
+    } catch (e) {
+      console.warn('Unable to update property status on booking reject', e && e.message ? e.message : e);
+    }
 
     const admin = req.user || {};
     const result = await logAdminAction({

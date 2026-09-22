@@ -1,6 +1,6 @@
 import fs from 'fs/promises';
 import path from 'path';
-import Property from '../models/Property.js';
+import Property, { normalizePropertyImages } from '../models/Property.js';
 
 function svgContent(id, title, color) {
   return `<?xml version="1.0" encoding="UTF-8"?>\n<svg xmlns="http://www.w3.org/2000/svg" width="1200" height="800">\n  <rect width="100%" height="100%" fill="${color}" />\n  <text x="50%" y="48%" font-size="48" fill="#ffffff" text-anchor="middle" font-family="Arial">${title}</text>\n  <text x="50%" y="60%" font-size="24" fill="#ffffff" text-anchor="middle" font-family="Arial">${id}</text>\n</svg>`;
@@ -36,6 +36,7 @@ export async function seedDemoIfMissing() {
         const img2Url = `https://source.unsplash.com/1200x800/?${encodeURIComponent(query)}&sig=${i + 100}`;
         const img3Url = `https://source.unsplash.com/1200x800/?${encodeURIComponent(query)}&sig=${i + 200}`;
 
+        const normalizedImages = normalizePropertyImages([coverUrl, img2Url, img3Url], coverUrl);
         const prop = {
           title: `${cat.title} Demo ${i}`,
           description: `Demo ${cat.title} property number ${i}.`,
@@ -48,8 +49,9 @@ export async function seedDemoIfMissing() {
           bedrooms: Math.floor(Math.random() * 5) + 1,
           bathrooms: Math.floor(Math.random() * 3) + 1,
           area: Math.floor(Math.random() * 200) + 50,
-          images: [coverUrl, img2Url, img3Url],
-          image: coverUrl,
+          images: normalizedImages.images,
+          image: normalizedImages.image,
+          featuredImage: normalizedImages.featuredImage,
           ownerId: 'demo-seed',
           createdAt: new Date(),
           updatedAt: new Date(),

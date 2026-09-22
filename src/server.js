@@ -34,6 +34,7 @@ import propertyVerificationRoutes from './routes/property-verification.js';
 import areasRoutes from './routes/areas.js';
 import rentalRoutes from './routes/rentals.js';
 import imageRoutes from './routes/images.js';
+import applicationsRoutes from './routes/applications.js';
 
 import chatbotRoutes from './routes/chatbotroutes.js';
 import adminRoutes from './routes/admin.js';
@@ -150,6 +151,7 @@ app.use('/api/tenant-profile', rentalRoutes);
 app.use('/api/tenant-profiles', rentalRoutes);
 app.use('/api/rent-bookings', bookingRoutes);
 app.use('/api/images', imageRoutes);
+app.use('/api/applications', applicationsRoutes);
 app.use('/api/reviews', reviewsRoutes);
 
 app.get('/api/health', (req, res) => {

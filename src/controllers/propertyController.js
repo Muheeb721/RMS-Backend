@@ -1,6 +1,6 @@
 import fs from 'fs';
 import path from 'path';
-import Property from '../models/Property.js';
+import Property, { normalizePropertyImages } from '../models/Property.js';
 
 const getStoredImagePath = (imageUrl) => {
   if (!imageUrl || typeof imageUrl !== 'string') return null;
@@ -144,6 +144,11 @@ export const calculateOfferPrice = (price, discountPercent = 0) => {
 export const createProperty = async (req, res) => {
   try {
     const input = req.body || {};
+    const normalizedImages = normalizePropertyImages(
+      Array.isArray(input.images) ? input.images : (input.image ? [input.image] : []),
+      input.featuredImage?.url || input.image || ''
+    );
+
     const normalized = {
       ...input,
       purpose: input.purpose || input.transactionType || 'Sale',
@@ -155,8 +160,9 @@ export const createProperty = async (req, res) => {
       price: Number(input.price || input.salePrice || 0),
       salePrice: Number(input.salePrice || input.price || 0),
       rent: Number(input.rent || 0),
-      images: Array.isArray(input.images) ? input.images : input.image ? [input.image] : [],
-      image: input.image || (Array.isArray(input.images) ? input.images[0] : ''),
+      images: normalizedImages.images,
+      image: normalizedImages.image,
+      featuredImage: normalizedImages.featuredImage,
       videos: Array.isArray(input.videos) ? input.videos : input.video ? [input.video] : [],
       media3d: Array.isArray(input.media3d) ? input.media3d : input.model3d ? [input.model3d] : [],
       updatedAt: new Date(),

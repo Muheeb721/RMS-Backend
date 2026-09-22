@@ -21,6 +21,33 @@ const resolveUser = async (userRef) => {
   return null;
 };
 
+const normalizeProfileImagePath = (value) => {
+  if (!value || typeof value !== 'string') return '';
+  const trimmed = value.trim();
+  if (!trimmed) return '';
+  return trimmed.startsWith('http') || trimmed.startsWith('data:') ? trimmed : trimmed;
+};
+
+const normalizeAdminProfileRecord = (source = {}, imageUrl = '') => {
+  const name = String(source.name || source.fullName || '').trim();
+  const fullName = String(source.fullName || source.name || '').trim();
+  const email = String(source.email || '').trim();
+  const phone = String(source.phone || '').trim();
+  const role = String(source.role || 'admin').trim() || 'admin';
+
+  const safeImageUrl = imageUrl || normalizeProfileImagePath(source.profileImage || source.image || '');
+
+  return {
+    name: name || source.name || '',
+    fullName: fullName || source.fullName || name || '',
+    email,
+    phone,
+    role,
+    profileImage: safeImageUrl,
+    image: safeImageUrl,
+  };
+};
+
 export const getProfile = async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
@@ -33,26 +60,102 @@ export const getProfile = async (req, res) => {
   }
 };
 
-export const updateProfile = async (req, res) => {
+export const updateProfileImage = async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
-    const updates = req.body || {};
-    const profileUpdate = updates.profile && typeof updates.profile === 'object' ? updates.profile : updates;
-
-    // prevent updating role or password via this endpoint
-    delete profileUpdate.role;
-    delete profileUpdate.passwordHash;
     const existing = await resolveUser(req.user);
     if (!existing) return res.status(404).json({ success: false, message: 'User not found.' });
 
-    const mergedProfile = {
+    const file = req.file;
+    if (!file) return res.status(400).json({ success: false, message: 'No profile image file provided.' });
+
+    const relativeUrl = `/images/admin-profiles/${file.filename}`;
+    const nextProfile = {
       ...(existing.profile || {}),
-      ...profileUpdate,
+      name: existing.name || existing.profile?.name || '',
+      fullName: existing.name || existing.profile?.fullName || '',
+      email: existing.email || existing.profile?.email || '',
+      phone: existing.phone || existing.profile?.phone || '',
+      profileImage: relativeUrl,
+      image: relativeUrl,
     };
 
-    const user = await User.findByIdAndUpdate(existing._id, { profile: mergedProfile }, { new: true }).select('-passwordHash').lean();
+    const user = await User.findByIdAndUpdate(
+      existing._id,
+      {
+        profileImage: relativeUrl,
+        profile: nextProfile,
+        name: existing.name || nextProfile.name || '',
+        phone: existing.phone || nextProfile.phone || '',
+      },
+      { new: true },
+    ).select('-passwordHash').lean();
+
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    return res.json({ success: true, data: user });
+
+    return res.json({ success: true, data: user, message: 'Profile image updated successfully.' });
+  } catch (error) {
+    console.error('Update profile image failed', error);
+    return res.status(500).json({ success: false, message: 'Unable to update profile image.' });
+  }
+};
+
+export const updateProfile = async (req, res) => {
+  try {
+    if (!req.user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
+
+    const rawBody = req.body || {};
+    const updates = typeof rawBody === 'object' && rawBody && rawBody.profile && typeof rawBody.profile === 'object' ? rawBody.profile : rawBody;
+    const profileUpdate = { ...(updates || {}) };
+
+    const existing = await resolveUser(req.user);
+    if (!existing) return res.status(404).json({ success: false, message: 'User not found.' });
+
+    const files = req.files || {};
+    const profileFile = Array.isArray(files.profileImage) ? files.profileImage[0] : null;
+    const cnicFile = Array.isArray(files.cnicImage) ? files.cnicImage[0] : null;
+
+    const imageUrl = profileFile
+      ? `/images/admin-profiles/${profileFile.filename}`
+      : normalizeProfileImagePath(profileUpdate.profileImage || profileUpdate.image || existing.profileImage || existing.profile?.profileImage || existing.profile?.image || '');
+
+    const cnicImageUrl = cnicFile ? `/images/admin-profiles/${cnicFile.filename}` : normalizeProfileImagePath(profileUpdate.cnicImage || existing.profile?.cnicImage || '');
+
+    const updatedName = String(profileUpdate.name || profileUpdate.fullName || existing.name || existing.profile?.name || '').trim();
+    const updatedFullName = String(profileUpdate.fullName || profileUpdate.name || existing.profile?.fullName || existing.name || '').trim();
+    const updatedEmail = String(profileUpdate.email || existing.email || existing.profile?.email || '').trim();
+    const updatedPhone = String(profileUpdate.phone || existing.phone || existing.profile?.phone || '').trim();
+    const updatedRole = String(profileUpdate.role || existing.role || 'admin').trim() || 'admin';
+
+    const mergedProfile = normalizeAdminProfileRecord({
+      ...(existing.profile || {}),
+      name: updatedName || existing.name || '',
+      fullName: updatedFullName || updatedName || existing.name || '',
+      email: updatedEmail || existing.email || '',
+      phone: updatedPhone || existing.phone || '',
+      role: updatedRole,
+      ...profileUpdate,
+    }, imageUrl || existing.profileImage || existing.profile?.profileImage || existing.profile?.image || '');
+
+    const updatePayload = {
+      name: updatedName || updatedFullName || existing.name || '',
+      email: updatedEmail || existing.email || '',
+      phone: updatedPhone || existing.phone || '',
+      role: updatedRole,
+      profileImage: mergedProfile.profileImage || existing.profileImage || '',
+      profile: {
+        ...mergedProfile,
+        profileImage: mergedProfile.profileImage || existing.profileImage || existing.profile?.profileImage || '',
+        image: mergedProfile.image || existing.profileImage || existing.profile?.image || '',
+        cnicImage: cnicImageUrl || existing.profile?.cnicImage || '',
+      },
+      updatedAt: new Date(),
+    };
+
+    const user = await User.findByIdAndUpdate(existing._id, updatePayload, { new: true }).select('-passwordHash').lean();
+    if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+
+    return res.json({ success: true, data: user, message: 'Profile updated successfully.' });
   } catch (error) {
     console.error('Update profile failed', error);
     return res.status(500).json({ success: false, message: 'Unable to update profile.' });

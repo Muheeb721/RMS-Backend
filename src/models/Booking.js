@@ -33,6 +33,9 @@ const bookingSchema = new mongoose.Schema({
   updatedAt: { type: Date, default: Date.now },
   // Applicant / personal information
   cnic: { type: String, default: '' },
+  // uploaded images (profile / CNIC) - Flow B
+  profileImage: { type: String, default: '' },
+  cnicImage: { type: String, default: '' },
   dateOfBirth: { type: Date, default: null },
   nationality: { type: String, default: '' },
   // Current address
@@ -57,6 +60,8 @@ const bookingSchema = new mongoose.Schema({
   previousLandlordRelationship: { type: String, default: '' },
   // Terms
   termsAccepted: { type: Boolean, default: false },
+  // flow type: contact for Houses/Apartments, rent_application for Flats
+  flowType: { type: String, default: 'contact' },
 }, { timestamps: false });
 
 bookingSchema.pre('save', function next(next) {
