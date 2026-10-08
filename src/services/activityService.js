@@ -1,6 +1,62 @@
 import AdminActionLog from '../models/AdminActionLog.js';
 import UserNotification from '../models/UserNotification.js';
 import { buildUserNotification, normalizeAction } from '../utils/activity.js';
+import User from '../models/User.js';
+
+export const createAdminNotification = async ({
+  actionType,
+  entityType,
+  entityId,
+  title,
+  message,
+  actorName = 'System',
+  userId = '',
+  userName = '',
+  metadata = {},
+}) => {
+  const adminUsers = await User.find({ role: 'admin' }).select('_id name').lean();
+  if (!adminUsers.length) return null;
+
+  const normalizedAction = normalizeAction(actionType);
+  const normalizedEntity = String(entityType || 'GENERAL').toUpperCase();
+  const dedupeFilter = {
+    recipientRole: 'admin',
+    actionType: normalizedAction,
+    entityType: normalizedEntity,
+    entityId: String(entityId || ''),
+    userId: String(userId || ''),
+  };
+  const existing = await UserNotification.findOne(dedupeFilter).lean();
+  if (existing) return existing;
+
+  const docs = adminUsers.map((admin) => ({
+    userId: admin._id.toString(),
+    recipientId: admin._id.toString(),
+    recipientRole: 'admin',
+    userName: admin.name || 'Admin',
+    actorType: 'user',
+    actorName,
+    entityType: normalizedEntity,
+    entityId: String(entityId || ''),
+    actionType: normalizedAction,
+    type: normalizedEntity.toLowerCase(),
+    title: title || `${normalizedEntity} notification`,
+    message: message || `A new ${normalizedEntity.toLowerCase()} action requires review.`,
+    metadata,
+    status: 'New',
+    isRead: false,
+    createdAt: new Date(),
+  }));
+
+  const created = await UserNotification.insertMany(docs);
+  for (const notification of created) {
+    const io = globalThis.__rmsSocketServer;
+    if (io) {
+      io.to(`admin:${notification.recipientId}`).emit('notification:new', notification);
+    }
+  }
+  return created[0] || null;
+};
 
 export const logAdminAction = async ({
   adminId,
@@ -17,6 +73,7 @@ export const logAdminAction = async ({
   reason,
   description,
   propertyName,
+  metadata = {},
 }) => {
   const normalizedActionType = normalizeAction(actionType);
 
@@ -55,6 +112,8 @@ export const logAdminAction = async ({
   if (userId) {
     notification = await UserNotification.create({
       userId,
+      recipientId: userId,
+      recipientRole: 'user',
       userName: userName || '',
       actorType: 'admin',
       actorName: adminName || 'Admin',
@@ -65,8 +124,23 @@ export const logAdminAction = async ({
       message: notificationPayload.message,
       reason: reason || '',
       status: newStatus || 'Updated',
+      metadata,
       isRead: false,
       createdAt: new Date(),
+    });
+  }
+
+  if (userId && String(adminId || '').toLowerCase() === 'system') {
+    await createAdminNotification({
+      actionType: normalizedActionType,
+      entityType,
+      entityId,
+      userId,
+      userName,
+      actorName: userName || 'RMS User',
+      title: `${entityType || 'Activity'} submitted`,
+      message: message || `${userName || 'A user'} submitted a new ${String(entityType || 'activity').toLowerCase()}.`,
+      metadata,
     });
   }
 

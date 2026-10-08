@@ -1,4 +1,5 @@
 import User from '../models/User.js';
+import RentalProfile from '../models/RentalProfile.js';
 
 // helper: resolve user by id or email to support dev sessions that provide email
 const resolveUser = async (userRef) => {
@@ -154,6 +155,29 @@ export const updateProfile = async (req, res) => {
 
     const user = await User.findByIdAndUpdate(existing._id, updatePayload, { new: true }).select('-passwordHash').lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
+
+    const rentalProfileFields = {
+      fullName: updatedFullName || updatedName,
+      email: updatedEmail,
+      phone: updatedPhone,
+      profileImage: mergedProfile.profileImage || '',
+      cnicImage: cnicImageUrl || '',
+      currentAddress: String(profileUpdate.currentAddress || profileUpdate.address || '').trim(),
+      city: String(profileUpdate.city || '').trim(),
+      occupation: String(profileUpdate.occupation || '').trim(),
+      emergencyContactName: String(profileUpdate.emergencyContactName || profileUpdate.emergencyContact || '').trim(),
+      emergencyContactPhone: String(profileUpdate.emergencyContactPhone || profileUpdate.emergencyContactNumber || '').trim(),
+    };
+    if (rentalProfileFields.fullName && rentalProfileFields.email && rentalProfileFields.phone
+      && rentalProfileFields.currentAddress && rentalProfileFields.city && rentalProfileFields.occupation
+      && rentalProfileFields.emergencyContactName) {
+      await RentalProfile.findOneAndUpdate(
+        { userId: String(existing._id) },
+        { $set: { ...rentalProfileFields, userId: String(existing._id), profileStatus: 'Profile Complete' } },
+        { upsert: true, new: true, runValidators: true, setDefaultsOnInsert: true },
+      );
+      await User.findByIdAndUpdate(existing._id, { hasRentalProfile: true });
+    }
 
     return res.json({ success: true, data: user, message: 'Profile updated successfully.' });
   } catch (error) {

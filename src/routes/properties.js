@@ -9,6 +9,7 @@ const upload = multer({
   storage: multer.memoryStorage(),
   limits: {
     fileSize: 5 * 1024 * 1024,
+    files: 10,
   },
 });
 
@@ -17,7 +18,7 @@ router.get('/', listProperties);
 router.get('/:id', getProperty);
 
 // Admin protected routes for managing properties
-router.post('/', requireAuth, requireAdmin, createProperty);
+router.post('/', requireAuth, requireAdmin, upload.array('images', 10), createProperty);
 router.put('/:id', requireAuth, requireAdmin, updateProperty);
 router.delete('/:id', requireAuth, requireAdmin, deleteProperty);
 router.post('/:id/status', requireAuth, requireAdmin, updatePropertyStatus);

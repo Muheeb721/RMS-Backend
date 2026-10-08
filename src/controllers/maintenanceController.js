@@ -1,5 +1,6 @@
 import mongoose from 'mongoose';
 import Maintenance from '../models/Maintenance.js';
+import { createAdminNotification } from '../services/activityService.js';
 
 const getMemoryMaintenanceRequests = () => {
   globalThis.__rmsMaintenanceRequests ??= [];
@@ -34,6 +35,15 @@ export const createMaintenanceRequest = async (req, res) => {
     }
 
     const request = await Maintenance.create(payload);
+    await createAdminNotification({
+      actionType: 'MAINTENANCE_SUBMITTED',
+      entityType: 'MAINTENANCE',
+      entityId: request._id.toString(),
+      userId: request.userId,
+      userName: request.userName,
+      title: 'Maintenance request submitted',
+      message: `${request.userName || 'A user'} submitted a maintenance request for ${request.propertyName || 'a property'}.`,
+    });
     return res.status(201).json({ success: true, data: request });
   } catch (error) {
     console.error('Create maintenance request failed', error);

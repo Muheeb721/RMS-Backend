@@ -1,10 +1,25 @@
 import fs from 'fs';
 import path from 'path';
+import { randomUUID } from 'crypto';
+import { fileURLToPath } from 'url';
 import Property from '../models/Property.js';
 import { logAdminAction } from '../services/activityService.js';
 import cloudinaryService from '../services/cloudinaryService.js';
 
-const imagesDir = path.join(process.cwd(), 'Backend', 'public', 'images');
+const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+const imagesDir = path.join(backendRoot, 'public', 'uploads', 'properties');
+const localImagePath = (url) => {
+  const cleanUrl = stripCacheBust(url || '');
+  const relativePath = cleanUrl.startsWith('/uploads/')
+    ? cleanUrl.slice(1)
+    : cleanUrl.startsWith('/images/')
+      ? cleanUrl.slice(1)
+      : '';
+  if (!relativePath) return null;
+  const publicDir = path.join(backendRoot, 'public');
+  const resolved = path.resolve(publicDir, relativePath);
+  return resolved.startsWith(`${path.resolve(publicDir)}${path.sep}`) ? resolved : null;
+};
 
 const ensureImagesDir = () => {
   if (!fs.existsSync(imagesDir)) fs.mkdirSync(imagesDir, { recursive: true });
@@ -42,8 +57,9 @@ const saveUploadedFile = async (file) => {
   }
 
   ensureImagesDir();
-  const originalName = (file.originalname || file.name || 'upload').replace(/\s+/g, '-');
-  const filename = `${Date.now()}-${originalName}`;
+  const originalName = file.originalname || file.name || 'upload';
+  const extension = path.extname(originalName).toLowerCase();
+  const filename = `${randomUUID()}${extension}`;
   const dest = path.join(imagesDir, filename);
 
   if (file.buffer && file.buffer.length > 0) {
@@ -57,7 +73,7 @@ const saveUploadedFile = async (file) => {
 
   return {
     filename,
-    url: `/images/${filename}`,
+    url: `/uploads/properties/${filename}`,
     dest,
     public_id: '',
     cloudinary: false,
@@ -92,24 +108,27 @@ export const uploadPropertyImage = async (req, res) => {
       return res.status(400).json({ success: false, message: `File too large. Maximum allowed size is ${Math.round(MAX_BYTES / 1024 / 1024)}MB.` });
     }
     
+    const prop = await Property.findById(propertyId);
+    if (!prop) return res.status(404).json({ success: false, message: 'Property not found.' });
     const saved = await saveUploadedFile(file);
     const relativeUrl = saved.url;
     const cleanUrl = stripCacheBust(relativeUrl);
-
-    const prop = await Property.findById(propertyId);
-    if (!prop) return res.status(404).json({ success: false, message: 'Property not found.' });
-    // Normalize existing images into objects
     const existingImages = normalizeExistingImages(prop);
+    const currentPrimaryUrl = stripCacheBust(prop.image || prop.featuredImage?.url || '');
+    if (currentPrimaryUrl && !existingImages.some((image) => stripCacheBust(image.url) === currentPrimaryUrl)) {
+      existingImages.unshift({
+        url: currentPrimaryUrl,
+        public_id: prop.featuredImage?.public_id || '',
+      });
+    }
 
     const imageObj = { url: cleanUrl, public_id: saved.public_id || '' };
-    prop.images = [imageObj, ...existingImages].filter(Boolean);
+    prop.images = [...existingImages, imageObj].filter(Boolean);
 
-    // Keep legacy `image` string in sync for compatibility
-    if (!prop.image) prop.image = cleanUrl;
-    // Update featuredImage metadata if missing
-    if (!prop.featuredImage || !prop.featuredImage.url) {
-      prop.featuredImage = { url: prop.image || cleanUrl, public_id: prop.images[0]?.public_id || '' };
-    }
+    // Adding a gallery image must not change the property's existing cover image.
+    const primaryImage = prop.images[0] || imageObj;
+    prop.image = primaryImage.url;
+    prop.featuredImage = { url: primaryImage.url, public_id: primaryImage.public_id || '' };
     prop.updatedAt = new Date();
     await prop.save();
 
@@ -200,11 +219,10 @@ export const replacePropertyImage = async (req, res) => {
     // Save objects back to property
     prop.images = normalized;
 
-    // Update main image and featured metadata if needed
-      if (!prop.image || !prop.featuredImage || !prop.featuredImage.url) {
-      prop.image = prop.images[0]?.url || '';
-      prop.featuredImage = { url: prop.image || '', public_id: prop.images[0]?.public_id || '' };
-    }
+    // The first persisted image is the primary image for every client.
+    const primaryImage = prop.images[0] || {};
+    prop.image = primaryImage.url || '';
+    prop.featuredImage = { url: primaryImage.url || '', public_id: primaryImage.public_id || '' };
 
     prop.updatedAt = new Date();
     await prop.save();
@@ -214,9 +232,9 @@ export const replacePropertyImage = async (req, res) => {
       if (oldImageObj) {
         if (oldImageObj.public_id) {
           try { await cloudinaryService.deleteByPublicId(oldImageObj.public_id); } catch (e) { console.warn('Cloudinary delete failed', e?.message || e); }
-        } else if (oldImageObj.url && oldImageObj.url.startsWith('/images/')) {
-          const oldPath = path.join(imagesDir, path.basename(stripCacheBust(oldImageObj.url)));
-          if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+        } else {
+          const oldPath = localImagePath(oldImageObj.url);
+          if (oldPath && fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
         }
       }
     } catch (e) {
@@ -268,7 +286,12 @@ export const deletePropertyImage = async (req, res) => {
       removedIndex = idxById;
     } else if (typeof imageIndex !== 'undefined') {
       const idx = Number(imageIndex || 0);
-      if (idx < 0 || idx >= existingImages.length) return res.status(400).json({ success: false, message: `Invalid image index ${idx}. Property has ${existingImages.length} images.` });
+      if (!Number.isInteger(idx) || idx < 0 || idx >= existingImages.length) {
+        return res.status(400).json({
+          success: false,
+          message: `Invalid image index ${imageIndex}. Property has ${existingImages.length} images.`,
+        });
+      }
       removed = existingImages.splice(idx, 1)[0];
       removedIndex = idx;
     } else {
@@ -280,11 +303,16 @@ export const deletePropertyImage = async (req, res) => {
     // Update main image
     if (!prop.images.length) {
       prop.image = '';
+      prop.featuredImage = { url: '', public_id: '' };
     } else {
       const currentUrls = prop.images.map((it) => (typeof it === 'string' ? stripCacheBust(it) : stripCacheBust(it.url || '')));
       const mainUrl = stripCacheBust(prop.image || '');
       if (removedIndex === 0 || !prop.image || !currentUrls.includes(mainUrl)) {
         prop.image = (typeof prop.images[0] === 'string' ? prop.images[0] : prop.images[0].url) || '';
+        prop.featuredImage = {
+          url: prop.image,
+          public_id: prop.images[0]?.public_id || '',
+        };
       }
     }
     
@@ -296,9 +324,9 @@ export const deletePropertyImage = async (req, res) => {
       const removedObj = typeof removed === 'string' ? { url: stripCacheBust(removed), public_id: '' } : removed;
       if (removedObj && removedObj.public_id) {
         try { await cloudinaryService.deleteByPublicId(removedObj.public_id); } catch (e) { console.warn('Cloudinary delete failed', e?.message || e); }
-      } else if (removedObj && removedObj.url && removedObj.url.startsWith('/images/')) {
-        const oldPath = path.join(imagesDir, path.basename(stripCacheBust(removedObj.url)));
-        if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
+      } else if (removedObj) {
+        const oldPath = localImagePath(removedObj.url);
+        if (oldPath && fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
       }
     } catch (e) {
       console.warn('Failed to delete image file:', e?.message || e);
@@ -378,10 +406,8 @@ export const updateMainPropertyImage = async (req, res) => {
           try { await cloudinaryService.deleteByPublicId(oldMain.public_id); } catch (e) { console.warn('Cloudinary delete failed', e?.message || e); }
         } else if (typeof oldMain === 'string') {
           const oldUrl = stripCacheBust(oldMain);
-          if (oldUrl.startsWith('/images/')) {
-            const oldPath = path.join(imagesDir, path.basename(oldUrl));
-            if (fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
-          }
+          const oldPath = localImagePath(oldUrl);
+          if (oldPath && fs.existsSync(oldPath)) fs.unlinkSync(oldPath);
         }
       }
     } catch (e) {
@@ -400,7 +426,15 @@ export const updateMainPropertyImage = async (req, res) => {
     });
 
     const responseImages = prop.images.map((img) => (typeof img === 'string' ? addCacheBust(img) : addCacheBust(img.url || '')));
-    return res.json({ success: true, data: { url: addCacheBust(cleanUrl), images: responseImages, property: prop } });
+    const property = typeof prop.toObject === 'function' ? prop.toObject() : prop;
+    console.info('Main property image updated:', {
+      propertyId: String(propertyId),
+      propertyType: property.propertyType,
+      category: property.category,
+      image: property.image,
+      imageCount: Array.isArray(property.images) ? property.images.length : 0,
+    });
+    return res.json({ success: true, data: { url: addCacheBust(cleanUrl), images: responseImages, property } });
   } catch (error) {
     console.error('Update main property image failed:', error);
     return res.status(500).json({ success: false, message: 'Update main property image failed.' });

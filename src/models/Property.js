@@ -45,6 +45,8 @@ const propertySchema = new mongoose.Schema({
   listingType: { type: String, default: 'rent' },
   location: { type: String, default: '' },
   city: { type: String, default: '' },
+  latitude: { type: Number, default: null },
+  longitude: { type: Number, default: null },
   // structured location fields
   society: { type: String, default: '' },
   phase: { type: String, default: '' },
@@ -57,7 +59,14 @@ const propertySchema = new mongoose.Schema({
   amenities: { type: [String], default: [] },
   ownerId: { type: String, default: '' },
   ownerName: { type: String, default: '' },
+  ownerPhone: { type: String, default: '' },
+  ownerEmail: { type: String, default: '' },
   managerName: { type: String, default: '' },
+  deposit: { type: Number, default: 0 },
+  otherCharges: { type: Number, default: 0 },
+  floor: { type: Number, default: 0 },
+  totalFloors: { type: Number, default: 0 },
+  priceHistory: { type: [mongoose.Schema.Types.Mixed], default: [] },
   // images stored as objects to support Cloudinary metadata
   images: {
     type: [

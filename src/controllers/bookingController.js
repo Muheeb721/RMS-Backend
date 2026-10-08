@@ -2,25 +2,82 @@ import Booking from '../models/Booking.js';
 import Property from '../models/Property.js';
 import UserNotification from '../models/UserNotification.js';
 import Payment from '../models/Payment.js';
+import Tenant from '../models/Tenant.js';
+import RentPayment from '../models/RentPayment.js';
+import RentalProfile from '../models/RentalProfile.js';
+import User from '../models/User.js';
 import { logAdminAction } from '../services/activityService.js';
-import { sendBookingSubmittedEmail, sendBookingApprovedEmail, sendBookingRejectedEmail } from '../services/emailService.js';
+import { sendRentalDetailsEmails } from '../services/emailService.js';
 import { buildUserNotification } from '../utils/activity.js';
 
 export const createBooking = async (req, res) => {
+  let propertyToUnlock = null;
   try {
     const body = req.body || {};
     const user = req.user || {};
-    const effectiveUserId = String(body.userId || user.id || `guest-${Date.now()}`).trim();
-    const bookingStatus = body.bookingStatus || body.status || 'Pending';
-    const paymentStatus = body.paymentStatus || 'Pending';
-    const propertyId = body.propertyId || body.property?.id || '';
-    const propertyName = body.propertyName || body.propertyTitle || body.property?.title || '';
-    const propertyTitle = body.propertyTitle || propertyName || '';
-    const propertyType = body.propertyType || body.type || body.property?.type || '';
-    const amount = Number(body.amount || body.rent || body.totalAmount || 0);
-    const userName = body.customerName || body.userName || user.name || body.fullName || 'Guest User';
-    const userEmail = body.userEmail || body.email || user.email || '';
-    const userPhone = body.userPhone || body.phone || body.customerPhone || '';
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin';
+    const effectiveUserId = String((isAdmin && body.userId) || user.id || user.userId || user._id || '').trim();
+    if (!effectiveUserId) return res.status(401).json({ success: false, message: 'Please sign in before booking a rental property.' });
+    const propertyId = String(body.propertyId || body.property?.id || body.property?._id || '').trim();
+    if (!/^[\da-f]{24}$/i.test(propertyId)) {
+      return res.status(400).json({ success: false, message: 'Choose a valid property before submitting the booking.' });
+    }
+
+    const [property, rentalProfile, dbUser] = await Promise.all([
+      Property.findById(propertyId).lean(),
+      RentalProfile.findOne({ userId: effectiveUserId }).lean(),
+      User.findById(effectiveUserId).select('name email phone profile profileImage').lean(),
+    ]);
+    if (!property) return res.status(404).json({ success: false, message: 'The selected property could not be found.' });
+    if (!rentalProfile && !isAdmin) {
+      return res.status(409).json({ success: false, message: 'Complete your rental profile before submitting a booking.' });
+    }
+
+    const currentStatus = String(property.status || property.availability || '').trim();
+    const statusKey = currentStatus.toLowerCase();
+    if (['booked', 'rented', 'occupied', 'sold', 'reserved'].includes(statusKey)
+      || String(property.availability || '').toLowerCase() === 'booked') {
+      return res.status(409).json({ success: false, message: 'This property has already been booked and is no longer available.' });
+    }
+    const listingType = String(property.listingType || '').toLowerCase();
+    const transactionType = `${property.transactionType || ''} ${property.purpose || ''}`.toLowerCase();
+    const isSaleListing = ['sale', 'buy', 'purchase'].some((term) => listingType.includes(term))
+      || (!listingType && ['sale', 'buy', 'purchase'].some((term) => transactionType.includes(term)));
+    if (isSaleListing) {
+      return res.status(400).json({ success: false, message: 'This property is not available for rent.' });
+    }
+
+    const oldPropertyState = { status: property.status, availability: property.availability };
+    const reservedProperty = await Property.findOneAndUpdate(
+      {
+        _id: property._id,
+        status: property.status,
+        availability: property.availability,
+      },
+      { $set: { status: 'Booked', availability: 'Booked', updatedAt: new Date() } },
+      { new: true },
+    ).lean();
+    if (!reservedProperty) {
+      return res.status(409).json({ success: false, message: 'This property has just been booked by another user.' });
+    }
+    propertyToUnlock = { id: property._id, oldPropertyState };
+
+    const bookingStatus = 'Pending';
+    const paymentStatus = 'Pending';
+    const propertyName = String(property.title || property.name || '');
+    const propertyTitle = propertyName;
+    const propertyType = String(property.propertyType || property.type || property.category || '');
+    const amount = Number(property.rent || property.price || 0);
+    const userName = String(rentalProfile?.fullName || (isAdmin ? body.customerName || body.userName : dbUser?.name || user.name) || '').trim();
+    const userEmail = String(rentalProfile?.email || (isAdmin ? body.userEmail : dbUser?.email || user.email) || '').trim();
+    const userPhone = String(rentalProfile?.phone || (isAdmin ? body.customerPhone || body.userPhone : dbUser?.phone) || '').trim();
+    if ((!isAdmin && !userEmail) || !userName || !userPhone || !(amount > 0)) {
+      await Property.findOneAndUpdate({ _id: property._id, status: 'Booked' }, {
+        $set: { ...oldPropertyState, updatedAt: new Date() },
+      });
+      propertyToUnlock = null;
+      return res.status(400).json({ success: false, message: 'Your rental profile or the property rent amount is incomplete.' });
+    }
 
     const booking = await Booking.create({
       userId: effectiveUserId,
@@ -29,12 +86,13 @@ export const createBooking = async (req, res) => {
       userPhone,
       customerName: userName,
       customerPhone: userPhone,
-      propertyId,
+      propertyId: property._id.toString(),
       propertyName,
       propertyTitle,
       propertyType,
+      propertyImage: property.featuredImage?.url || property.image || property.images?.[0]?.url || '',
       amount,
-      rent: Number(body.rent || amount || 0),
+      rent: amount,
       rentFrequency: body.rentFrequency || 'Monthly',
       moveInDate: body.moveInDate ? new Date(body.moveInDate) : null,
       rentalDuration: body.rentalDuration || '1 month',
@@ -74,9 +132,10 @@ export const createBooking = async (req, res) => {
       visitDate: body.visitDate ? new Date(body.visitDate) : null,
       // flow type and uploaded images
       flowType: body.flowType || (propertyType === 'Flat' || String(propertyType).toLowerCase() === 'flat' ? 'rent_application' : 'contact'),
-      profileImage: body.profileImage || (user && user.profile ? user.profile.profileImage || user.profileImage || '' : ''),
-      cnicImage: body.cnicImage || (user && user.profile ? user.profile.cnicImage || '' : ''),
+      profileImage: rentalProfile?.profileImage || dbUser?.profileImage || dbUser?.profile?.profileImage || body.profileImage || '',
+      cnicImage: rentalProfile?.cnicImage || dbUser?.profile?.cnicImage || body.cnicImage || '',
     });
+    propertyToUnlock = null;
 
     try {
       await logAdminAction({
@@ -92,35 +151,47 @@ export const createBooking = async (req, res) => {
         description: `Booking ${booking._id} submitted by user.`,
         newStatus: booking.bookingStatus || booking.status || 'Pending',
         propertyName: booking.propertyTitle || '',
+        metadata: {
+          bookingId: booking._id.toString(),
+          propertyId: booking.propertyId,
+          propertyName: booking.propertyTitle || booking.propertyName,
+          propertyImage: booking.propertyImage,
+          rent: booking.rent || booking.amount,
+          bookingDate: booking.bookingDate,
+          email: booking.userEmail,
+          phone: booking.userPhone,
+          profileImage: booking.profileImage,
+          cnicImage: booking.cnicImage,
+        },
       });
     } catch (e) {
       console.warn('Booking notification create failed via logAdminAction:', e && e.message ? e.message : e);
     }
 
     try {
-      if (booking.userEmail) {
-        await sendBookingSubmittedEmail({
-          userName: booking.userName || booking.customerName || 'RMS User',
-          userEmail: booking.userEmail,
-          userId: booking.userId,
-          bookingId: booking._id.toString(),
-          propertyName: booking.propertyTitle || booking.propertyName || 'N/A',
-          propertyType: booking.propertyType || 'N/A',
-          location: booking.city || 'N/A',
-          monthlyRent: booking.rent || booking.amount || 0,
-          moveInDate: booking.moveInDate ? new Date(booking.moveInDate).toISOString().slice(0, 10) : 'N/A',
-          rentalDuration: booking.rentalDuration || 'N/A',
-          bookingStatus: 'Pending Confirmation',
-          bookingDate: booking.bookingDate ? new Date(booking.bookingDate).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
-        });
-      }
+      const deliveries = await sendRentalDetailsEmails({
+        rental: booking.toObject(),
+        status: booking.status,
+        eventType: 'submitted',
+      });
+      deliveries.filter((delivery) => !delivery.success).forEach((delivery) => console.warn('Booking email was not delivered:', delivery.message));
     } catch (emailError) {
-      console.warn('Booking submitted email failed:', emailError && emailError.message ? emailError.message : emailError);
+      console.warn('Booking email failed:', emailError && emailError.message ? emailError.message : emailError);
     }
 
     return res.status(201).json({ success: true, data: booking });
   } catch (error) {
     console.error('Create booking failed', error);
+    if (propertyToUnlock) {
+      try {
+        await Property.findOneAndUpdate(
+          { _id: propertyToUnlock.id, status: 'Booked' },
+          { $set: { ...propertyToUnlock.oldPropertyState, updatedAt: new Date() } },
+        );
+      } catch (unlockError) {
+        console.error('Could not restore property availability after booking failure:', unlockError);
+      }
+    }
     return res.status(500).json({ success: false, message: 'Unable to create booking.' });
   }
 };
@@ -147,9 +218,54 @@ export const listAllBookings = async (req, res) => {
   }
 };
 
+export const updateBooking = async (req, res) => {
+  try {
+    const { id } = req.params || {};
+    if (!id) return res.status(400).json({ success: false, message: 'Missing booking id.' });
+
+    const body = req.body || {};
+    const editableFields = [
+      'customerName',
+      'customerPhone',
+      'userName',
+      'userEmail',
+      'userPhone',
+      'propertyId',
+      'propertyName',
+      'propertyTitle',
+      'propertyType',
+      'bookingDate',
+      'visitDate',
+      'amount',
+      'rent',
+      'paymentStatus',
+      'bookingStatus',
+      'status',
+      'notes',
+      'message',
+    ];
+    const updates = Object.fromEntries(
+      editableFields
+        .filter((field) => Object.hasOwn(body, field))
+        .map((field) => [field, body[field]]),
+    );
+    if (Object.hasOwn(updates, 'bookingStatus')) updates.status = updates.bookingStatus;
+    if (!Object.keys(updates).length) {
+      return res.status(400).json({ success: false, message: 'No booking fields were provided.' });
+    }
+
+    updates.updatedAt = new Date();
+    const booking = await Booking.findByIdAndUpdate(id, { $set: updates }, { new: true, runValidators: true }).lean();
+    if (!booking) return res.status(404).json({ success: false, message: 'Booking not found.' });
+    return res.json({ success: true, data: booking });
+  } catch (error) {
+    console.error('Update booking failed', error);
+    return res.status(500).json({ success: false, message: 'Unable to update booking.' });
+  }
+};
+
 export const approveBooking = async (req, res) => {
   try {
-    console.log("Booking ID received:",req.params.id)
     const { id } = req.params; // booking id
     const booking = await Booking.findById(id);
     if (!booking) return res.status(404).json({ success: false, message: 'Booking not found.' });
@@ -174,7 +290,7 @@ export const approveBooking = async (req, res) => {
       const total = Number(booking.rent || booking.amount || 0);
       if (total > 0) {
         const paymentPayload = {
-          userId: booking.userId || booking.userEmail || `guest-${Date.now()}`,
+          userId: booking.userId || booking.userI || '',
           userName: booking.userName || booking.customerName || '',
           userEmail: booking.userEmail || '',
           bookingId: booking._id.toString(),
@@ -203,6 +319,80 @@ export const approveBooking = async (req, res) => {
       console.warn('Create initial payment failed for booking approve', e && e.message ? e.message : e);
     }
 
+    // If booking approved, ensure a Tenant record exists for this user/property (auto-create)
+    try {
+      // prefer linking by userId when available
+      const userIdentifier = booking.userId || booking.userI || booking.userEmail || booking.userEmail || '';
+      const propertyId = booking.propertyId || booking.property || '';
+      // find existing tenant for same user and property
+      let existingTenant = null;
+      if (booking.userId) {
+        existingTenant = await Tenant.findOne({ userId: booking.userId, propertyId }).lean();
+      }
+      if (!existingTenant && booking.userEmail) {
+        existingTenant = await Tenant.findOne({ email: booking.userEmail, propertyId }).lean();
+      }
+
+      if (!existingTenant) {
+        const tenantPayload = {
+          userId: booking.userId || null,
+          name: booking.userName || booking.customerName || booking.userEmail || 'Tenant',
+          phone: booking.userPhone || booking.customerPhone || '',
+          email: booking.userEmail || '',
+          profileImage: booking.profileImage || '',
+          cnicImage: booking.cnicImage || '',
+          propertyId: booking.propertyId || '',
+          hostelId: booking.propertyId || booking.hostelId || '',
+          monthlyRent: Number(booking.rent || booking.amount || 0),
+          dueDay: 5,
+          moveInDate: booking.moveInDate || new Date(),
+          status: 'active',
+          createdAt: new Date(),
+          updatedAt: new Date(),
+        };
+
+        try {
+          const createdTenant = await Tenant.create(tenantPayload);
+
+          // create initial rent payment record for current month if rent amount > 0
+          if (Number(tenantPayload.monthlyRent) > 0) {
+            try {
+              const monthKey = new Date().toISOString().slice(0, 7);
+              const dueDate = new Date();
+              dueDate.setDate(tenantPayload.dueDay || 5);
+              dueDate.setHours(0, 0, 0, 0);
+
+              const existing = await RentPayment.findOne({ tenantId: createdTenant._id, month: monthKey }).lean();
+              if (!existing) {
+                await RentPayment.create({
+                  tenantId: createdTenant._id,
+                  month: monthKey,
+                  amountDue: Number(tenantPayload.monthlyRent || 0),
+                  amountPaid: 0,
+                  dueDate,
+                  paidDate: null,
+                  status: 'pending',
+                  lateDays: 0,
+                  lateFee: 0,
+                  method: 'cash',
+                  proofImage: '',
+                  verifiedByAdmin: false,
+                  notes: '',
+                });
+              }
+            } catch (e) {
+              console.warn('Unable to create initial rent payment for created tenant', e && e.message ? e.message : e);
+            }
+          }
+        } catch (e) {
+          // non-fatal
+          console.warn('Auto-create tenant failed on booking approve', e && e.message ? e.message : e);
+        }
+      }
+    } catch (e) {
+      console.warn('Tenant auto-create check failed', e && e.message ? e.message : e);
+    }
+
     const admin = req.user || {};
     const result = await logAdminAction({
       adminId: admin.id || admin._id || 'admin',
@@ -221,21 +411,10 @@ export const approveBooking = async (req, res) => {
     });
 
     try {
-      if (booking.userEmail) {
-        await sendBookingApprovedEmail({
-          userName: booking.userName || booking.customerName || 'RMS User',
-          userEmail: booking.userEmail,
-          userId: booking.userId,
-          bookingId: booking._id.toString(),
-          propertyName: booking.propertyTitle || booking.propertyName || 'N/A',
-          location: booking.city || 'N/A',
-          monthlyRent: booking.rent || booking.amount || 0,
-          moveInDate: booking.moveInDate ? new Date(booking.moveInDate).toISOString().slice(0, 10) : 'N/A',
-          status: 'Approved',
-        });
-      }
+      const deliveries = await sendRentalDetailsEmails({ rental: booking.toObject(), status: booking.status, eventType: 'approved' });
+      deliveries.filter((delivery) => !delivery.success).forEach((delivery) => console.warn('Booking approval email was not delivered:', delivery.message));
     } catch (emailError) {
-      console.warn('Booking approved email failed:', emailError && emailError.message ? emailError.message : emailError);
+      console.warn('Booking approval email failed:', emailError && emailError.message ? emailError.message : emailError);
     }
 
     return res.json({ success: true, data: booking, audit: result });
@@ -261,7 +440,17 @@ export const rejectBooking = async (req, res) => {
     // ensure property remains available on rejection
     try {
       if (booking.propertyId) {
-        await Property.findOneAndUpdate({ _id: booking.propertyId }, { status: 'Available', availability: 'Available' });
+        const otherActiveBooking = await Booking.exists({
+          _id: { $ne: booking._id },
+          propertyId: booking.propertyId,
+          status: { $nin: ['Rejected', 'Cancelled', 'Deleted'] },
+        });
+        if (!otherActiveBooking) {
+          await Property.findOneAndUpdate(
+            { _id: booking.propertyId, status: 'Booked' },
+            { status: 'Available', availability: 'Available' },
+          );
+        }
       }
     } catch (e) {
       console.warn('Unable to update property status on booking reject', e && e.message ? e.message : e);
@@ -286,18 +475,10 @@ export const rejectBooking = async (req, res) => {
     });
 
     try {
-      if (booking.userEmail) {
-        await sendBookingRejectedEmail({
-          userName: booking.userName || booking.customerName || 'RMS User',
-          userEmail: booking.userEmail,
-          userId: booking.userId,
-          bookingId: booking._id.toString(),
-          propertyName: booking.propertyTitle || booking.propertyName || 'N/A',
-          reason: reason || 'No reason provided',
-        });
-      }
+      const deliveries = await sendRentalDetailsEmails({ rental: booking.toObject(), status: booking.status, eventType: 'rejected' });
+      deliveries.filter((delivery) => !delivery.success).forEach((delivery) => console.warn('Booking rejection email was not delivered:', delivery.message));
     } catch (emailError) {
-      console.warn('Booking rejected email failed:', emailError && emailError.message ? emailError.message : emailError);
+      console.warn('Booking rejection email failed:', emailError && emailError.message ? emailError.message : emailError);
     }
 
     return res.json({ success: true, data: booking, audit: result });
@@ -317,7 +498,17 @@ export const deleteBooking = async (req, res) => {
     // attempt to restore property availability if this booking reserved it
     try {
       if (booking.propertyId) {
-        await Property.findOneAndUpdate({ _id: booking.propertyId }, { status: 'Available', availability: 'Available' });
+        const otherActiveBooking = await Booking.exists({
+          _id: { $ne: booking._id },
+          propertyId: booking.propertyId,
+          status: { $nin: ['Rejected', 'Cancelled', 'Deleted'] },
+        });
+        if (!otherActiveBooking) {
+          await Property.findOneAndUpdate(
+            { _id: booking.propertyId, status: 'Booked' },
+            { status: 'Available', availability: 'Available' },
+          );
+        }
       }
     } catch (e) {
       console.warn('Unable to update property status on booking delete', e && e.message ? e.message : e);

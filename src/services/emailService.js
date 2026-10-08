@@ -1,16 +1,26 @@
 import nodemailer from 'nodemailer';
+import path from 'node:path';
 import EmailLog from '../models/EmailLog.js';
 
 const normalizeBoolean = (value) => value === true || value === 'true' || value === 1 || value === '1';
+const escapeHtml = (value) => String(value ?? '').replace(/[&<>"']/g, (character) => ({
+  '&': '&amp;',
+  '<': '&lt;',
+  '>': '&gt;',
+  '"': '&quot;',
+  "'": '&#39;',
+})[character]);
 
 const getTransportConfig = () => {
-  const host = process.env.SMTP_HOST || '';
-  const port = Number(process.env.SMTP_PORT || 587);
   const user = process.env.SMTP_USER || '';
-  const pass = process.env.SMTP_PASSWORD || '';
-  const secure = normalizeBoolean(process.env.SMTP_SECURE || false);
+  const pass = process.env.SMTP_PASS || '';
+  const host = String(process.env.SMTP_HOST || '').trim();
+  const configuredPort = Number.parseInt(process.env.SMTP_PORT || '', 10);
+  const port = Number.isInteger(configuredPort) && configuredPort > 0 ? configuredPort : 587;
+  const secure = normalizeBoolean(process.env.SMTP_SECURE || port === 465);
+  const from = getFromAddress();
 
-  if (!host || !user || !pass) {
+  if (!host || !user || !pass || !from) {
     return null;
   }
 
@@ -22,13 +32,14 @@ const getTransportConfig = () => {
   };
 };
 
-const getFromAddress = () => process.env.SMTP_FROM || process.env.RMS_SUPPORT_EMAIL || 'no-reply@rms.local';
+const getFromAddress = () => process.env.MAIL_FROM || '';
+const getAdminEmail = () => String(process.env.ADMIN_EMAIL || 'admin@rental.com').trim().toLowerCase();
 const getSupportAddress = () => process.env.RMS_SUPPORT_EMAIL || 'support@rms.local';
 
 const buildHtmlTemplate = ({ title, intro, userName, bodyLines = [], footerText = '', highlight = '' }) => {
-  const safeName = String(userName || 'RMS User').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+  const safeName = escapeHtml(userName || 'RMS User');
   const linesHtml = bodyLines
-    .map((line) => `<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#243244;">${line}</p>`)
+    .map((line) => `<p style="margin:0 0 12px; font-size:14px; line-height:1.6; color:#243244;">${escapeHtml(line)}</p>`)
     .join('');
 
   return `
@@ -85,6 +96,7 @@ export const sendEmail = async ({
   userId = '',
   metadata = {},
   dedupeKey = '',
+  attachments = [],
 }) => {
   const recipient = String(to || '').trim();
   if (!recipient) {
@@ -114,6 +126,7 @@ export const sendEmail = async ({
   try {
     const transportConfig = getTransportConfig();
     if (!transportConfig) {
+      console.warn('SMTP is not configured; email was skipped. Set SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, and MAIL_FROM in the backend .env file.');
       await EmailLog.findByIdAndUpdate(log._id, {
         status: 'skipped',
         error: 'SMTP configuration missing. Email not sent.',
@@ -129,6 +142,7 @@ export const sendEmail = async ({
       subject,
       text: text || 'RMS email',
       html: html || '<p>RMS email</p>',
+      attachments,
     });
 
     await EmailLog.findByIdAndUpdate(log._id, {
@@ -147,6 +161,130 @@ export const sendEmail = async ({
     });
     return { success: false, skipped: false, log, message };
   }
+};
+
+export const sendAdminPasswordResetEmail = async ({ email, otp }) => {
+  const subject = 'Your RMS admin password reset code';
+  const text = `Your RMS admin password reset code is ${otp}. It expires in 10 minutes. If you did not request this, ignore this email.`;
+  const html = `<p>Your RMS admin password reset code is <strong>${otp}</strong>.</p><p>It expires in 10 minutes. If you did not request this, ignore this email.</p>`;
+  return sendEmail({
+    to: email,
+    type: 'ADMIN_PASSWORD_RESET_OTP',
+    subject,
+    text,
+    html,
+    dedupeKey: `admin-password-reset:${Date.now()}:${email}`,
+  });
+};
+
+export const sendAdminBookingSubmittedEmail = async (booking) => {
+  const adminEmail = getAdminEmail();
+  const rows = {
+    'Booking ID': booking._id,
+    'Property': booking.propertyTitle || booking.propertyName,
+    'Rent': `PKR ${Number(booking.rent || booking.amount || 0).toLocaleString()}`,
+    'Booking date': new Date(booking.bookingDate || Date.now()).toISOString(),
+    'Move-in date': booking.moveInDate ? new Date(booking.moveInDate).toISOString() : 'Not provided',
+    'Status': booking.status || 'Pending',
+    'User name': booking.userName,
+    'User email': booking.userEmail,
+    'User phone': booking.userPhone,
+    'CNIC': booking.cnic || 'Not provided',
+    'Date of birth': booking.dateOfBirth ? new Date(booking.dateOfBirth).toISOString().slice(0, 10) : 'Not provided',
+    'Address': [booking.addressLine1, booking.addressLine2, booking.city, booking.province, booking.country].filter(Boolean).join(', ') || 'Not provided',
+    'Employment status': booking.employmentStatus || 'Not provided',
+    'Company': booking.companyName || 'Not provided',
+    'Job title': booking.jobTitle || 'Not provided',
+    'Monthly income': booking.monthlyIncome ? `PKR ${Number(booking.monthlyIncome).toLocaleString()}` : 'Not provided',
+    'Occupants': booking.occupants || 1,
+    'Reason for renting': booking.reasonForRent || booking.message || 'Not provided',
+    'CNIC image': booking.cnicImage || 'Not provided',
+    'Profile image': booking.profileImage || 'Not provided',
+  };
+  const text = ['A new rental booking was submitted.', '', ...Object.entries(rows).map(([label, value]) => `${label}: ${value}`)].join('\n');
+  const html = `<h2>New rental booking</h2><table>${Object.entries(rows)
+    .map(([label, value]) => `<tr><th align="left">${escapeHtml(label)}</th><td>${escapeHtml(value)}</td></tr>`).join('')}</table>`;
+  return sendEmail({
+    to: adminEmail,
+    type: 'ADMIN_BOOKING_SUBMITTED',
+    subject: `New rental booking: ${booking.propertyTitle || booking.propertyName || 'Property'}`,
+    text,
+    html,
+    bookingId: String(booking._id || ''),
+    userId: booking.userId,
+    metadata: { bookingId: String(booking._id || ''), propertyId: booking.propertyId },
+    dedupeKey: `ADMIN_BOOKING_SUBMITTED:${booking._id}`,
+  });
+};
+
+export const sendRentalDetailsEmails = async ({ rental, status, eventType, agreementPath = '' }) => {
+  const adminEmail = getAdminEmail();
+  const recipientDetails = [
+    { email: String(rental.userEmail || rental.email || '').trim(), label: 'user' },
+    { email: adminEmail, label: 'admin' },
+  ].filter((recipient) => recipient.email);
+  const lines = [
+    `Request ID: ${rental._id || rental.id || 'N/A'}`,
+    `Property: ${rental.propertyTitle || rental.propertyName || 'N/A'}`,
+    `Property type: ${rental.propertyType || 'N/A'}`,
+    `User: ${rental.userName || rental.fullName || 'N/A'} (${rental.userEmail || rental.email || 'N/A'})`,
+    `CNIC: ${rental.cnic || 'Not provided'}`,
+    `Phone: ${rental.userPhone || rental.phone || 'N/A'}`,
+    `Move-in date: ${rental.moveInDate || rental.preferredMoveInDate ? new Date(rental.moveInDate || rental.preferredMoveInDate).toISOString().slice(0, 10) : 'Not provided'}`,
+    `Move-out date: ${rental.rentalEndDate || rental.toDate || rental.endDate ? new Date(rental.rentalEndDate || rental.toDate || rental.endDate).toISOString().slice(0, 10) : 'Not provided'}`,
+    `Rental duration: ${rental.rentalDuration || rental.rentalDurationMonths || 'Not provided'}`,
+    `Amount: PKR ${Number(rental.rent || rental.monthlyRent || rental.amount || 0).toLocaleString()}`,
+    `Status: ${status || rental.applicationStatus || rental.status || 'Pending'}`,
+  ];
+  const text = [
+    `Dear ${rental.userName || rental.fullName || 'RMS User'},`,
+    '',
+    'Please find the rental request summary below.',
+    '',
+    ...lines,
+    '',
+    agreementPath ? 'Your rental agreement is attached to this email.' : '',
+    '',
+    'Regards,',
+    'RMS Rental Management System',
+  ].filter(Boolean).join('\n');
+  const rows = lines.map((line) => `<p style="margin:0 0 8px;">${escapeHtml(line)}</p>`).join('');
+  const html = `
+    <div style="font-family:Arial,sans-serif;color:#243244;line-height:1.6;">
+      <h2 style="color:#173b67;">Rental request update</h2>
+      <p>Dear ${escapeHtml(rental.userName || rental.fullName || 'RMS User')},</p>
+      <p>Please find the rental request summary below.</p>
+      ${rows}
+      ${agreementPath ? '<p>The rental agreement is attached to this email for your records.</p>' : ''}
+      <p>Regards,<br />RMS Rental Management System</p>
+    </div>
+  `;
+  const uniqueRecipients = [...new Map(recipientDetails.map((recipient) => [recipient.email.toLowerCase(), recipient])).values()];
+
+  return Promise.all(uniqueRecipients.map((recipient) => sendEmail({
+    to: recipient.email,
+    userId: String(rental.userId || ''),
+    type: 'BOOKING_SUBMITTED',
+    subject: `RMS rental update: ${rental.propertyTitle || rental.propertyName || 'Property'} — ${status || rental.status || 'Updated'}`,
+    text,
+    html,
+    attachments: agreementPath ? [{
+      filename: path.basename(agreementPath),
+      path: agreementPath,
+      contentType: 'application/pdf',
+    }] : [],
+    bookingId: String(rental._id || rental.id || ''),
+    metadata: {
+      property: rental.propertyTitle || rental.propertyName || '',
+      user: rental.userName || rental.fullName || '',
+      dates: rental.moveInDate || rental.preferredMoveInDate || '',
+      amount: Number(rental.rent || rental.monthlyRent || rental.amount || 0),
+      status: status || rental.applicationStatus || rental.status || 'Pending',
+      eventType: String(eventType || 'status'),
+      recipientRole: recipient.label,
+    },
+    dedupeKey: `rental-${eventType}-${rental._id || rental.id}-${recipient.email.toLowerCase()}`,
+  })));
 };
 
 export const createProfileCompletedEmail = ({ userName, userEmail }) => {
@@ -216,6 +354,53 @@ export const createBookingSubmittedEmail = ({ userName, userEmail, propertyName,
       footerText: 'Thank you for choosing RMS. We truly appreciate your trust in our Rental Management System.',
     }),
   };
+
+};
+
+export const createSaleInterestSubmittedEmail = ({ userName, userEmail, propertyName, propertyType, preferredMoveInDate, submissionId }) => {
+  const intro = 'Your buying-interest form has been successfully submitted to the RMS Rental Management System.';
+  const bodyLines = [
+    `Your registered email: ${userEmail || 'Not available'}`,
+    `Property: ${propertyName || 'N/A'}`,
+    `Property Type: ${propertyType || 'N/A'}`,
+    `Preferred Move-in Date: ${preferredMoveInDate || 'N/A'}`,
+    `Submission ID: ${submissionId || 'N/A'}`,
+    'Our team will review your request and contact you shortly.',
+  ];
+
+  return {
+    subject: 'Your Buying Interest Was Submitted Successfully – RMS',
+    html: buildHtmlTemplate({
+      title: 'Buying Interest Submitted',
+      intro,
+      userName,
+      bodyLines,
+      footerText: 'Thank you for choosing RMS. We will be in touch regarding your property interest.',
+      highlight: 'Submission received successfully',
+    }),
+    text: buildTextVersion({ title: 'Buying Interest Submitted', intro, userName, bodyLines }),
+  };
+};
+
+export const sendSaleInterestSubmittedEmail = async ({ userName, userEmail, userId, propertyName, propertyType, preferredMoveInDate, submissionId }) => {
+  const template = createSaleInterestSubmittedEmail({
+    userName,
+    userEmail,
+    propertyName,
+    propertyType,
+    preferredMoveInDate,
+    submissionId,
+  });
+  return sendEmail({
+    to: userEmail,
+    type: 'sale_interest_submitted',
+    subject: template.subject,
+    html: template.html,
+    text: template.text,
+    userId,
+    metadata: { propertyName, propertyType, submissionId },
+    dedupeKey: `sale-interest-submitted:${submissionId}:${userEmail}`,
+  });
 };
 
 export const createBookingApprovedEmail = ({ userName, propertyName, location, monthlyRent, moveInDate, bookingId, status }) => {

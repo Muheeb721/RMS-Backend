@@ -1,8 +1,6 @@
 import mongoose from 'mongoose';
 import Payment from '../models/Payment.js';
-import User from '../models/User.js';
-import UserNotification from '../models/UserNotification.js';
-import { logAdminAction } from '../services/activityService.js';
+import { logAdminAction, createAdminNotification } from '../services/activityService.js';
 
 const getMemoryPayments = () => {
   globalThis.__rmsPayments ??= [];
@@ -68,23 +66,6 @@ export const createPayment = async (req, res) => {
 
     const payment = await Payment.create(payload);
     try {
-      const adminUser = await User.findOne({ role: 'admin' }).lean();
-      if (adminUser && adminUser._id) {
-        await UserNotification.create({
-          userId: adminUser._id.toString(),
-          userName: adminUser.name || 'Admin',
-          actorType: 'system',
-          actorName: 'System',
-          entityType: 'PAYMENT',
-          entityId: payment._id.toString(),
-          actionType: 'PAYMENT_SUBMITTED',
-          title: 'Payment Submitted',
-          message: `Payment for ${payment.propertyName || 'a property'} was submitted by user ${payment.userId}.`,
-          isRead: false,
-          createdAt: new Date(),
-        });
-      }
-
       await logAdminAction({
         adminId: 'system',
         adminName: 'System',
@@ -97,6 +78,15 @@ export const createPayment = async (req, res) => {
         description: `Payment ${payment._id} submitted by user ${payment.userId}`,
         propertyName: payment.propertyName || '',
         newStatus: payment.status || 'Submitted',
+      });
+      await createAdminNotification({
+        actionType: 'PAYMENT_SUBMITTED',
+        entityType: 'PAYMENT',
+        entityId: payment._id.toString(),
+        userId: payment.userId,
+        userName: payment.userName,
+        title: 'Payment Submitted',
+        message: `Payment for ${payment.propertyName || 'a property'} was submitted by ${payment.userName || payment.userId}.`,
       });
     } catch (e) {
       console.warn('Payment notification creation failed:', e && e.message ? e.message : e);

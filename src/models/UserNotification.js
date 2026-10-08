@@ -3,7 +3,17 @@ import mongoose from 'mongoose';
 const userNotificationSchema = new mongoose.Schema({
   userId: {
     type: String,
-    required: true,
+    default: '',
+    index: true,
+  },
+  recipientId: {
+    type: String,
+    default: '',
+    index: true,
+  },
+  recipientRole: {
+    type: String,
+    default: 'user',
     index: true,
   },
   userName: {
@@ -29,7 +39,7 @@ const userNotificationSchema = new mongoose.Schema({
   },
   actionType: {
     type: String,
-    required: true,
+    default: 'SYSTEM',
     index: true,
   },
   title: {
@@ -47,6 +57,15 @@ const userNotificationSchema = new mongoose.Schema({
   status: {
     type: String,
     default: 'Updated',
+  },
+  metadata: {
+    type: mongoose.Schema.Types.Mixed,
+    default: {},
+  },
+  type: {
+    type: String,
+    default: 'system',
+    index: true,
   },
   isRead: {
     type: Boolean,

@@ -1,29 +1,68 @@
 import RentApplication from '../models/RentApplication.js';
 import Property from '../models/Property.js';
 import { logAdminAction } from '../services/activityService.js';
-import { sendBookingSubmittedEmail, sendBookingApprovedEmail, sendBookingRejectedEmail } from '../services/emailService.js';
+import { sendRentalDetailsEmails } from '../services/emailService.js';
+import { generateRentalAgreement, getRentalAgreementPath } from '../services/rentalAgreementService.js';
+import fs from 'node:fs';
+
+const deriveRentalEndDate = (startValue, durationValue) => {
+  if (!startValue || !durationValue) return null;
+  const startDate = new Date(startValue);
+  const duration = String(durationValue).match(/(\d+)\s*(month|year)/i);
+  if (Number.isNaN(startDate.getTime()) || !duration) return null;
+
+  const months = Number(duration[1]) * (duration[2].toLowerCase() === 'year' ? 12 : 1);
+  const endDate = new Date(Date.UTC(startDate.getUTCFullYear(), startDate.getUTCMonth() + months, startDate.getUTCDate()));
+  endDate.setUTCDate(endDate.getUTCDate() - 1);
+  return endDate;
+};
 
 export const createApplication = async (req, res) => {
   try {
     const body = req.body || {};
     const user = req.user || {};
-    const userId = String(body.userId || user.id || user._id || user.email || `guest-${Date.now()}`).trim();
+    const userId = String(user.id || user.userId || user._id || '').trim();
+    if (!userId) {
+      return res.status(401).json({ success: false, message: 'Please sign in before submitting a rental request.' });
+    }
+
+    const startDate = body.preferredMoveInDate || body.fromDate || body.moveInDate || null;
+    const suppliedEndDate = body.toDate || body.endDate || body.rentalEndDate || null;
     const application = await RentApplication.create({
       userId,
       userName: body.userName || user.name || '',
       userEmail: body.userEmail || user.email || '',
       userPhone: body.userPhone || '',
+      cnic: body.cnic || body.CNIC || '',
       profileImage: body.profileImage || '',
       cnicImage: body.cnicImage || '',
       propertyId: String(body.propertyId || ''),
       propertyTitle: body.propertyTitle || '',
       propertyType: body.propertyType || '',
       rent: Number(body.rent || 0),
+      moveInDate: startDate
+        ? new Date(startDate)
+        : null,
+      rentalEndDate: suppliedEndDate
+        ? new Date(suppliedEndDate)
+        : deriveRentalEndDate(startDate, body.rentalDuration || ''),
+      rentalDuration: body.rentalDuration || '',
+      occupants: Number(body.occupants || 1),
       applicationStatus: 'pending',
       notes: body.notes || '',
       submittedAt: new Date(),
       updatedAt: new Date(),
     });
+
+    let agreementPath = '';
+    try {
+      const agreement = await generateRentalAgreement(application.toObject());
+      application.agreementPath = agreement.relativePath;
+      await application.save();
+      agreementPath = agreement.absolutePath;
+    } catch (agreementError) {
+      console.error('Rental agreement generation failed after application save:', agreementError);
+    }
 
     try {
       await logAdminAction({
@@ -36,33 +75,65 @@ export const createApplication = async (req, res) => {
         userName: application.userName,
         message: `New rent application submitted for ${application.propertyTitle || application.propertyId}`,
         propertyName: application.propertyTitle || '',
+        metadata: {
+          rentalApplicationId: application._id.toString(),
+          agreementUrl: application.agreementPath || '',
+          propertyName: application.propertyTitle || application.propertyId,
+          userName: application.userName,
+          rent: application.rent,
+          moveInDate: application.moveInDate,
+          rentalEndDate: application.rentalEndDate,
+          rentalDuration: application.rentalDuration,
+        },
       });
     } catch (e) {
       console.warn('Log admin action failed for rent application', e?.message || e);
     }
 
     try {
-      if (application.userEmail) {
-        await sendBookingSubmittedEmail({
-          userName: application.userName || 'Applicant',
-          userEmail: application.userEmail,
-          userId: application.userId,
-          bookingId: application._id.toString(),
-          propertyName: application.propertyTitle || 'N/A',
-          propertyType: application.propertyType || 'N/A',
-          monthlyRent: application.rent || 0,
-          bookingStatus: 'Pending',
-          bookingDate: application.submittedAt ? new Date(application.submittedAt).toISOString().slice(0, 10) : new Date().toISOString().slice(0, 10),
-        });
-      }
+      const deliveries = await sendRentalDetailsEmails({
+        rental: application.toObject(),
+        status: application.applicationStatus,
+        eventType: 'submitted',
+        agreementPath,
+      });
+      deliveries.filter((delivery) => !delivery.success).forEach((delivery) => {
+        console.warn('Rental application email was not delivered:', delivery.message);
+      });
     } catch (emailError) {
-      console.warn('Application submitted email failed:', emailError?.message || emailError);
+      console.warn('Rental application email failed:', emailError?.message || emailError);
     }
 
     return res.status(201).json({ success: true, data: application });
   } catch (error) {
     console.error('Create application failed', error);
     return res.status(500).json({ success: false, message: 'Unable to create application.' });
+  }
+};
+
+export const downloadApplicationAgreement = async (req, res) => {
+  try {
+    const application = await RentApplication.findById(req.params.id).select('userId agreementPath').lean();
+    if (!application) return res.status(404).json({ success: false, message: 'Rental application not found.' });
+
+    const userId = String(req.user?.id || req.user?.userId || req.user?._id || '');
+    const isAdmin = String(req.user?.role || '').toLowerCase() === 'admin';
+    if (!isAdmin && application.userId !== userId) {
+      return res.status(403).json({ success: false, message: 'You are not allowed to download this agreement.' });
+    }
+    if (!application.agreementPath) {
+      return res.status(404).json({ success: false, message: 'The rental agreement is not available.' });
+    }
+
+    const agreementPath = getRentalAgreementPath(req.params.id);
+    await fs.promises.access(agreementPath, fs.constants.R_OK);
+    return res.download(agreementPath, `rental-agreement-${req.params.id}.pdf`);
+  } catch (error) {
+    if (error?.code === 'ENOENT') {
+      return res.status(404).json({ success: false, message: 'The rental agreement file was not found.' });
+    }
+    console.error('Download rental agreement failed:', error);
+    return res.status(500).json({ success: false, message: 'Unable to download the rental agreement.' });
   }
 };
 
@@ -109,6 +180,7 @@ export const acceptApplication = async (req, res) => {
     const app = await RentApplication.findById(id);
     if (!app) return res.status(404).json({ success: false, message: 'Application not found.' });
 
+    const previousStatus = app.applicationStatus;
     app.applicationStatus = 'accepted';
     app.updatedAt = new Date();
     await app.save();
@@ -131,7 +203,7 @@ export const acceptApplication = async (req, res) => {
         entityId: app._id.toString(),
         userId: app.userId,
         userName: app.userName,
-        previousStatus: 'pending',
+        previousStatus,
         newStatus: 'accepted',
         message: `Rent application ${app._id} accepted`,
         propertyName: app.propertyTitle || '',
@@ -139,19 +211,9 @@ export const acceptApplication = async (req, res) => {
     } catch (e) { console.warn('Log admin action failed', e?.message || e); }
 
     try {
-      if (app.userEmail) {
-        await sendBookingApprovedEmail({
-          userName: app.userName || 'Applicant',
-          userEmail: app.userEmail,
-          userId: app.userId,
-          bookingId: app._id.toString(),
-          propertyName: app.propertyTitle || 'N/A',
-          location: '',
-          monthlyRent: app.rent || 0,
-          status: 'Accepted',
-        });
-      }
-    } catch (emailError) { console.warn('Accept email failed', emailError?.message || emailError); }
+      const deliveries = await sendRentalDetailsEmails({ rental: app.toObject(), status: app.applicationStatus, eventType: 'accepted' });
+      deliveries.filter((delivery) => !delivery.success).forEach((delivery) => console.warn('Rental approval email was not delivered:', delivery.message));
+    } catch (emailError) { console.warn('Rental approval email failed', emailError?.message || emailError); }
 
     return res.json({ success: true, data: app });
   } catch (error) {
@@ -168,6 +230,7 @@ export const rejectApplication = async (req, res) => {
     const app = await RentApplication.findById(id);
     if (!app) return res.status(404).json({ success: false, message: 'Application not found.' });
 
+    const previousStatus = app.applicationStatus;
     app.applicationStatus = 'rejected';
     app.rejectionReason = reason || '';
     app.updatedAt = new Date();
@@ -189,7 +252,7 @@ export const rejectApplication = async (req, res) => {
         entityId: app._id.toString(),
         userId: app.userId,
         userName: app.userName,
-        previousStatus: 'pending',
+        previousStatus,
         newStatus: 'rejected',
         message: `Rent application ${app._id} rejected`,
         reason: reason || '',
@@ -198,17 +261,9 @@ export const rejectApplication = async (req, res) => {
     } catch (e) { console.warn('Log admin action failed', e?.message || e); }
 
     try {
-      if (app.userEmail) {
-        await sendBookingRejectedEmail({
-          userName: app.userName || 'Applicant',
-          userEmail: app.userEmail,
-          userId: app.userId,
-          bookingId: app._id.toString(),
-          propertyName: app.propertyTitle || 'N/A',
-          reason: reason || 'No reason provided',
-        });
-      }
-    } catch (emailError) { console.warn('Reject email failed', emailError?.message || emailError); }
+      const deliveries = await sendRentalDetailsEmails({ rental: app.toObject(), status: app.applicationStatus, eventType: 'rejected' });
+      deliveries.filter((delivery) => !delivery.success).forEach((delivery) => console.warn('Rental rejection email was not delivered:', delivery.message));
+    } catch (emailError) { console.warn('Rental rejection email failed', emailError?.message || emailError); }
 
     return res.json({ success: true, data: app });
   } catch (error) {

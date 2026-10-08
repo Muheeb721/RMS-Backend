@@ -1,13 +1,19 @@
 import 'dotenv/config';
 import express from 'express';
+import http from 'http';
 import cors from 'cors';
 import path from 'path';
+import { fileURLToPath } from 'url';
+import { Server } from 'socket.io';
+import jwt from 'jsonwebtoken';
+import { randomBytes } from 'crypto';
 import {createRequire } from 'module';
 const require = createRequire(import.meta.url);
 const morgan = require('morgan');
 import bcrypt from 'bcryptjs';
 import { connectDatabase } from './config/database.js';
 import { seedDemoIfMissing } from './utils/demoSeeder.js';
+import startRentAutomation from './utils/rentAutomation.js';
 import { requireAdmin, requireAuth } from './middleware/auth.js';
 import User from './models/User.js';
 import UserNotification from './models/UserNotification.js';
@@ -35,11 +41,14 @@ import areasRoutes from './routes/areas.js';
 import rentalRoutes from './routes/rentals.js';
 import imageRoutes from './routes/images.js';
 import applicationsRoutes from './routes/applications.js';
+import saleInterestRoutes from './routes/sale-interest.js';
 
 import chatbotRoutes from './routes/chatbotroutes.js';
 import adminRoutes from './routes/admin.js';
+import tenantRoutes from './routes/tenants.js';
 
 const app = express();
+const httpServer = http.createServer(app);
 const DEFAULT_PORT = 5000;
 const configuredPort = Number.parseInt(process.env.PORT || '', 10);
 const START_PORT = Number.isInteger(configuredPort) && configuredPort > 0 ? configuredPort : DEFAULT_PORT;
@@ -54,21 +63,22 @@ process.on('unhandledRejection', (reason) => {
 });
 
 const ensureDefaultAdmin = async () => {
-  const adminEmail = 'admin@rms.com';
+  const adminEmail = String(process.env.ADMIN_EMAIL || 'admin@rental.com').trim().toLowerCase();
   const existing = await User.findOne({ email: adminEmail });
   if (!existing) {
-    const passwordHash = await bcrypt.hash('admin123', 10);
+    const bootstrapPassword = randomBytes(48).toString('hex');
+    const passwordHash = await bcrypt.hash(bootstrapPassword, 12);
     await User.create({
       name: 'System Admin',
       email: adminEmail,
       passwordHash,
       role: 'admin',
-      phone: '+923000000000',
-      profile: { name: 'System Admin', email: adminEmail, phone: '+923000000000' },
+      phone: '',
+      profile: { name: 'System Admin', email: adminEmail, phone: '' },
       createdAt: new Date(),
       updatedAt: new Date(),
     });
-    console.log('Default admin created with email admin@rms.com and password admin123');
+    console.log(`Admin account created for ${adminEmail}. Use the admin password reset flow to set its password.`);
     return;
   }
 
@@ -111,7 +121,9 @@ const corsOptions = {
       callback(null, true);
       return;
     }
-
+//cd AI-Modal
+//.venv\Scripts\activate
+//uvicorn app.main:app --reload --port 8000
     callback(new Error(`CORS blocked for origin: ${origin}`));
   },
   credentials: true,
@@ -119,12 +131,63 @@ const corsOptions = {
   allowedHeaders: ['Content-Type', 'Authorization', 'x-rms-session', 'X-Requested-With'],
 };
 
+const io = new Server(httpServer, {
+  cors: {
+    origin: (origin, callback) => {
+      if (isAllowedOrigin(origin)) {
+        callback(null, true);
+        return;
+      }
+      callback(new Error(`Socket CORS blocked for origin: ${origin}`));
+    },
+    credentials: true,
+    methods: ['GET', 'POST'],
+  },
+});
+
+globalThis.__rmsSocketServer = io;
+app.set('io', io);
+
+io.use((socket, next) => {
+  try {
+    const authToken = socket.handshake.auth?.token;
+    const header = socket.handshake.headers?.authorization || '';
+    const token = authToken || (header.startsWith('Bearer ') ? header.slice(7) : '');
+    if (!token) return next(new Error('Authentication required.'));
+
+    if (!process.env.JWT_SECRET) return next(new Error('Server authentication is not configured.'));
+    const decoded = jwt.verify(token, process.env.JWT_SECRET);
+    socket.user = {
+      id: decoded.userId || decoded.id,
+      role: String(decoded.role || '').toLowerCase(),
+      email: decoded.email || '',
+      name: decoded.name || '',
+    };
+
+    if (!socket.user.id) return next(new Error('Authentication required.'));
+    return next();
+  } catch (error) {
+    return next(new Error('Invalid or expired socket token.'));
+  }
+});
+
+io.on('connection', (socket) => {
+  if (socket.user.role === 'admin') {
+    socket.join(`admin:${String(socket.user.id)}`);
+  } else {
+    socket.join(`user:${String(socket.user.id)}`);
+  }
+});
+
 app.use(express.json());
 app.use(cors(corsOptions));
 app.options('*', cors(corsOptions));
-// serve demo/static images from Backend/public/images (used by demo seed)
-const imagesDir = path.join(process.cwd(), 'Backend', 'public', 'images');
+// Serve uploaded and demo property images from the backend public directory.
+const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+const imagesDir = path.join(backendRoot, 'public', 'images');
+const uploadsDir = path.join(backendRoot, 'public', 'uploads');
 app.use('/images', express.static(imagesDir));
+app.use('/uploads', express.static(uploadsDir));
 app.use(morgan('dev'));
 
 // mount api routers
@@ -141,6 +204,10 @@ app.use('/api/contact', contactRoutes);
 app.use('/api/property-inquiries', propertyInquiryRoutes);
 app.use('/api/users', userRoutes);
 app.use('/api/admin', adminRoutes);
+app.use('/api', tenantRoutes);
+app.use('/api/tenants', tenantRoutes);
+app.use('/api/rent', tenantRoutes);
+app.use('/api/rent-settings', tenantRoutes);
 app.use('/api/chatbot', chatbotRoutes);
 app.use('/api/analytics', analyticsRoutes);
 app.use('/api/about', aboutRoutes);
@@ -152,6 +219,7 @@ app.use('/api/tenant-profiles', rentalRoutes);
 app.use('/api/rent-bookings', bookingRoutes);
 app.use('/api/images', imageRoutes);
 app.use('/api/applications', applicationsRoutes);
+app.use('/api/sale-interest', saleInterestRoutes);
 app.use('/api/reviews', reviewsRoutes);
 
 app.get('/api/health', (req, res) => {
@@ -367,6 +435,9 @@ app.use((req, res) => {
 
 const startServer = async () => {
   try {
+    if (!process.env.JWT_SECRET || process.env.JWT_SECRET.length < 32) {
+      throw new Error('Set JWT_SECRET to a random value of at least 32 characters in the backend .env file.');
+    }
     await connectDatabase();
     await ensureDefaultAdmin();
     try {
@@ -375,11 +446,17 @@ const startServer = async () => {
       console.warn('Demo seeder failed', e?.message || e);
     }
 
+    try {
+      await startRentAutomation();
+    } catch (e) {
+      console.warn('Rent automation failed to start', e?.message || e);
+    }
+
     const candidatePorts = Array.from({ length: 10 }, (_, index) => START_PORT + index);
 
     const listenOnPort = (portIndex = 0) => {
       const port = candidatePorts[portIndex];
-      const server = app.listen(port, () => {
+      const server = httpServer.listen(port, () => {
         console.log(`RMS backend listening on http://localhost:${port}`);
       });
 

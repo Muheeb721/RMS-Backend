@@ -7,12 +7,14 @@ import {
   getApplicationById,
   acceptApplication,
   rejectApplication,
+  downloadApplicationAgreement,
 } from '../controllers/rentApplicationController.js';
 
 const router = express.Router();
 
 router.post('/', requireAuth, createApplication);
 router.get('/me', requireAuth, listUserApplications);
+router.get('/:id/agreement', requireAuth, downloadApplicationAgreement);
 router.get('/', requireAuth, requireAdmin, listAllApplications);
 router.get('/:id', requireAuth, requireAdmin, getApplicationById);
 router.put('/:id/accept', requireAuth, requireAdmin, acceptApplication);

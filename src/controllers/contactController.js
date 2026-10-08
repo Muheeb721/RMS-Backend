@@ -1,6 +1,5 @@
 import ContactRequest from '../models/ContactRequest.js';
-import User from '../models/User.js';
-import UserNotification from '../models/UserNotification.js';
+import { createAdminNotification } from '../services/activityService.js';
 
 export const createContact = async (req, res) => {
   try {
@@ -22,20 +21,15 @@ export const createContact = async (req, res) => {
 
     // notify admin (non-blocking)
     try {
-      const adminUser = await User.findOne({ role: 'admin' }).lean();
-      const adminId = adminUser && adminUser._id ? adminUser._id.toString() : 'admin';
-      await UserNotification.create({
-        userId: adminId,
-        userName: adminUser?.name || 'Admin',
-        actorType: 'user',
-        actorName: fullName || email || 'Visitor',
-        entityType: 'CONTACT',
-        entityId: record._id.toString(),
+      await createAdminNotification({
         actionType: 'CONTACT_FORM_SUBMITTED',
-        title: 'Contact Form Submitted',
-        message: `New contact form submitted by ${fullName || email || 'a visitor'}.`,
-        isRead: false,
-        createdAt: new Date(),
+        entityType: 'COMPLAINT',
+        entityId: record._id.toString(),
+        userId: record.userId || '',
+        userName: fullName || email || 'Visitor',
+        actorName: fullName || email || 'Visitor',
+        title: 'Complaint or contact request submitted',
+        message: `New complaint or contact request submitted by ${fullName || email || 'a visitor'}.`,
       });
     } catch (e) {
       console.warn('Contact admin notification failed:', e && e.message ? e.message : e);

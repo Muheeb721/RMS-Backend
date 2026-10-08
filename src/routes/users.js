@@ -2,11 +2,13 @@ import express from 'express';
 import multer from 'multer';
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import { getProfile, updateProfile, updateProfileImage } from '../controllers/userController.js';
 import { requireAuth } from '../middleware/auth.js';
 
 const router = express.Router();
-const uploadsDir = path.join(process.cwd(), 'Backend', 'public', 'images', 'admin-profiles');
+const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..', '..');
+const uploadsDir = path.join(backendRoot, 'public', 'images', 'admin-profiles');
 
 if (!fs.existsSync(uploadsDir)) {
   fs.mkdirSync(uploadsDir, { recursive: true });

@@ -1,11 +1,69 @@
 import UserNotification from '../models/UserNotification.js';
 
+const getUserIdValue = (user = {}) => String(user.id || user.userId || user._id || user.email || '');
+
+const normalizeNotification = (entry) => {
+  const item = entry && typeof entry.toObject === 'function' ? entry.toObject() : { ...(entry || {}) };
+  const recipientId = item.recipientId || item.userId || '';
+  const ownerId = item.userId || item.recipientId || '';
+
+  return {
+    ...item,
+    _id: item._id ? String(item._id) : item.id || '',
+    id: item._id ? String(item._id) : item.id || '',
+    userId: ownerId,
+    recipientId,
+    recipientRole: String(item.recipientRole || item.recipient || item.role || 'user').toLowerCase(),
+    type: String(item.type || item.entityType || item.actionType || 'system').toLowerCase(),
+  };
+};
+
+const emitNotification = (notification) => {
+  try {
+    const io = globalThis.__rmsSocketServer;
+    if (!io || !notification) return;
+    const normalized = normalizeNotification(notification);
+    const targetIds = new Set();
+
+    if (normalized.recipientId) targetIds.add(String(normalized.recipientId));
+    if (normalized.userId) targetIds.add(String(normalized.userId));
+
+    for (const targetId of targetIds) {
+      io.to(`user:${targetId}`).emit('notification:new', normalized);
+    }
+
+    if (normalized.recipientRole === 'admin' && normalized.recipientId) {
+      io.to(`admin:${String(normalized.recipientId)}`).emit('notification:new', normalized);
+    }
+  } catch (error) {
+    console.warn('Notification socket emit failed:', error.message || error);
+  }
+};
+
 export const listNotifications = async (req, res) => {
   try {
     const user = req.user || {};
-    if (!user || !user.id) return res.status(401).json({ success: false, message: 'Authentication required.' });
-    const items = await UserNotification.find({ userId: user.id }).sort({ createdAt: -1 }).lean();
-    return res.json({ success: true, data: items });
+    if (!user || !getUserIdValue(user)) return res.status(401).json({ success: false, message: 'Authentication required.' });
+
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin';
+    const userId = getUserIdValue(user);
+    const filter = isAdmin
+      ? {
+          $or: [
+            { recipientId: userId, recipientRole: 'admin' },
+            { userId, recipientRole: { $exists: false } },
+          ],
+        }
+      : {
+          $or: [
+            { userId },
+            { recipientId: userId },
+          ],
+          recipientRole: { $ne: 'admin' },
+        };
+
+    const items = await UserNotification.find(filter).sort({ createdAt: -1 }).lean();
+    return res.json({ success: true, data: items.map(normalizeNotification) });
   } catch (error) {
     console.error('List notifications failed', error);
     return res.status(500).json({ success: false, message: 'Unable to list notifications.' });
@@ -15,8 +73,26 @@ export const listNotifications = async (req, res) => {
 export const getUnreadCount = async (req, res) => {
   try {
     const user = req.user || {};
-    if (!user || !user.id) return res.status(401).json({ success: false, message: 'Authentication required.' });
-    const count = await UserNotification.countDocuments({ userId: user.id, isRead: { $ne: true } });
+    const userId = getUserIdValue(user);
+    if (!userId) return res.status(401).json({ success: false, message: 'Authentication required.' });
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin';
+    const filter = isAdmin
+      ? {
+          $or: [
+            { recipientId: userId, recipientRole: 'admin' },
+            { userId, recipientRole: { $exists: false } },
+          ],
+          isRead: { $ne: true },
+        }
+      : {
+          $or: [
+            { userId: userId },
+            { recipientId: userId },
+          ],
+          recipientRole: { $ne: 'admin' },
+          isRead: { $ne: true },
+        };
+    const count = await UserNotification.countDocuments(filter);
     return res.json({ success: true, data: { count } });
   } catch (error) {
     console.error('Unread count failed', error);
@@ -26,8 +102,14 @@ export const getUnreadCount = async (req, res) => {
 
 export const listAdminNotifications = async (req, res) => {
   try {
-    const items = await UserNotification.find({}).sort({ createdAt: -1 }).lean();
-    return res.json({ success: true, data: items });
+    const adminId = getUserIdValue(req.user || {});
+    const items = await UserNotification.find({
+      $or: [
+        { recipientId: adminId, recipientRole: 'admin' },
+        { userId: adminId, recipientRole: { $exists: false } },
+      ],
+    }).sort({ createdAt: -1 }).lean();
+    return res.json({ success: true, data: items.map(normalizeNotification) });
   } catch (error) {
     console.error('List admin notifications failed', error);
     return res.status(500).json({ success: false, message: 'Unable to list admin notifications.' });
@@ -37,10 +119,24 @@ export const listAdminNotifications = async (req, res) => {
 export const markAsRead = async (req, res) => {
   try {
     const user = req.user || {};
+    const userId = getUserIdValue(user);
     const { id } = req.params || {};
-    if (!user || !user.id) return res.status(401).json({ success: false, message: 'Authentication required.' });
-    const note = await UserNotification.findOneAndUpdate({ _id: id, userId: user.id }, { isRead: true }, { new: true }).lean();
-    return res.json({ success: true, data: note });
+    if (!userId) return res.status(401).json({ success: false, message: 'Authentication required.' });
+
+    const note = await UserNotification.findOneAndUpdate(
+      {
+        _id: id,
+        ...(String(user.role || '').toLowerCase() === 'admin' ? {} : { recipientRole: { $ne: 'admin' } }),
+        $or: [
+          { userId: userId },
+          { recipientId: userId },
+        ],
+      },
+      { isRead: true },
+      { new: true },
+    ).lean();
+
+    return res.json({ success: true, data: note ? normalizeNotification(note) : null });
   } catch (error) {
     console.error('Mark notification failed', error);
     return res.status(500).json({ success: false, message: 'Unable to mark notification.' });
@@ -50,8 +146,19 @@ export const markAsRead = async (req, res) => {
 export const markAllAsRead = async (req, res) => {
   try {
     const user = req.user || {};
-    if (!user || !user.id) return res.status(401).json({ success: false, message: 'Authentication required.' });
-    await UserNotification.updateMany({ userId: user.id, isRead: { $ne: true } }, { isRead: true });
+    const userId = getUserIdValue(user);
+    if (!userId) return res.status(401).json({ success: false, message: 'Authentication required.' });
+    await UserNotification.updateMany(
+      {
+        $or: [
+          { userId: userId },
+          { recipientId: userId },
+        ],
+        ...(String(user.role || '').toLowerCase() === 'admin' ? {} : { recipientRole: { $ne: 'admin' } }),
+        isRead: { $ne: true },
+      },
+      { isRead: true },
+    );
     return res.json({ success: true, message: 'All notifications marked as read.' });
   } catch (error) {
     console.error('Mark all notifications failed', error);
@@ -63,22 +170,33 @@ export const createNotification = async (req, res) => {
   try {
     const payload = req.body || {};
     const user = req.user || {};
-    const resolvedUserId = payload.userId || user.id || user._id || user.email || '';
-    const resolvedUserName = payload.userName || user.name || user.email || 'RMS User';
+    const actorId = getUserIdValue(user);
+    const requestedRecipientId = String(payload.recipientId || payload.userId || payload.targetUserId || actorId).trim();
+    const isAdmin = String(user.role || '').toLowerCase() === 'admin';
+    if (!isAdmin && requestedRecipientId !== actorId) {
+      return res.status(403).json({ success: false, message: 'You can only create notifications for your own account.' });
+    }
 
-    if (!resolvedUserId) {
+    const recipientId = requestedRecipientId;
+    const recipientRole = String(payload.recipientRole || payload.role || (isAdmin ? 'user' : user.role) || 'user').toLowerCase();
+    const userName = String(payload.userName || user.name || user.email || 'RMS User').trim();
+
+    if (!recipientId) {
       return res.status(400).json({ success: false, message: 'userId is required.' });
     }
 
     const note = await UserNotification.create({
-      userId: resolvedUserId,
-      userName: resolvedUserName,
+      userId: recipientId,
+      recipientId,
+      recipientRole,
+      userName,
       actorType: payload.actorType || user.role || 'system',
       actorName: payload.actorName || user.name || 'System',
       entityType: String(payload.entityType || 'GENERAL').toUpperCase(),
       entityId: payload.entityId || '',
       actionType: String(payload.actionType || 'SYSTEM').toUpperCase(),
       title: payload.title || payload.actionType || 'Notification',
+      type: String(payload.type || payload.entityType || payload.actionType || 'system').toLowerCase(),
       message: payload.message || '',
       reason: payload.reason || '',
       status: payload.status || 'Notice',
@@ -86,7 +204,8 @@ export const createNotification = async (req, res) => {
       createdAt: new Date(),
     });
 
-    return res.status(201).json({ success: true, data: note });
+    emitNotification(note);
+    return res.status(201).json({ success: true, data: normalizeNotification(note) });
   } catch (error) {
     console.error('Create notification failed', error);
     return res.status(500).json({ success: false, message: 'Unable to create notification.' });
@@ -96,10 +215,19 @@ export const createNotification = async (req, res) => {
 export const deleteNotification = async (req, res) => {
   try {
     const user = req.user || {};
+    const userId = getUserIdValue(user);
     const { id } = req.params || {};
-    if (!user || !user.id) return res.status(401).json({ success: false, message: 'Authentication required.' });
-    const note = await UserNotification.findOneAndDelete({ _id: id, userId: user.id }).lean();
-    return res.json({ success: true, data: note });
+    if (!userId) return res.status(401).json({ success: false, message: 'Authentication required.' });
+
+    const note = await UserNotification.findOneAndDelete({
+      _id: id,
+      $or: [
+        { userId: userId },
+        { recipientId: userId },
+      ],
+    }).lean();
+
+    return res.json({ success: true, data: note ? normalizeNotification(note) : null });
   } catch (error) {
     console.error('Delete notification failed', error);
     return res.status(500).json({ success: false, message: 'Unable to delete notification.' });

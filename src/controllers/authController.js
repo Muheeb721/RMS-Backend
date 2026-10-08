@@ -3,30 +3,61 @@ import jwt from 'jsonwebtoken';
 import User from '../models/User.js';
 import { logAdminAction } from '../services/activityService.js';
 
-const JWT_SECRET = process.env.JWT_SECRET || 'dev-secret';
+const getJwtSecret = () => {
+  if (!process.env.JWT_SECRET) throw new Error('JWT_SECRET is not configured.');
+  return process.env.JWT_SECRET;
+};
+const normalizeUserDocument = (user) => ({
+  _id: user?._id ?? user?.id,
+  id: user?._id ?? user?.id,
+  username: user?.username || '',
+  name: user?.name || '',
+  email: user?.email || '',
+  role: user?.role || 'resident',
+  phone: user?.phone || '',
+  profileImage: user?.profileImage || user?.profile?.profileImage || user?.profileData?.profileImage || '',
+  hasRentalProfile: Boolean(user?.hasRentalProfile),
+  profileData: user?.profileData || {},
+  favorites: user?.favorites || [],
+  preferences: user?.preferences || {},
+  lastLoginAt: user?.lastLoginAt || null,
+});
 
 export const signup = async (req, res) => {
   try {
-    const { name, email, password, phone, role } = req.body || {};
-    if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password are required.' });
+    const { name, email, username, password, confirmPassword, phone, role, profileData, preferences } = req.body || {};
+    if (!email || !password) {
+      return res.status(400).json({ success: false, message: 'Email and password are required.' });
+    }
 
     const normalizedEmail = String(email || '').trim().toLowerCase();
-    // Basic email format check
+    const normalizedUsername = username ? String(username).trim().toLowerCase() : (normalizedEmail.split('@')[0] || '').trim().toLowerCase();
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-    if (!emailRegex.test(normalizedEmail)) return res.status(400).json({ success: false, message: 'Invalid email address.' });
+    if (!emailRegex.test(normalizedEmail)) {
+      return res.status(400).json({ success: false, message: 'Invalid email address.' });
+    }
+    if (String(password).length < 8) {
+      return res.status(400).json({ success: false, message: 'Password must be at least 8 characters.' });
+    }
+    if (confirmPassword && String(password) !== String(confirmPassword)) {
+      return res.status(400).json({ success: false, message: 'Passwords do not match.' });
+    }
 
-    // normalizedEmail defined above
-    const existing = await User.findOne({ email: normalizedEmail }).lean();
-    if (existing) return res.status(409).json({ success: false, message: 'Email already in use.' });
+    const existing = await User.findOne({ $or: [{ email: normalizedEmail }, { username: normalizedUsername }] }).lean();
+    if (existing) {
+      return res.status(409).json({ success: false, message: 'Email already in use.' });
+    }
 
     const passwordHash = await bcrypt.hash(String(password), 10);
-    const userRole = String(role || 'resident').toLowerCase();
+    const requestedRole = String(role || 'resident').toLowerCase();
+    const userRole = requestedRole === 'owner' ? 'owner' : 'resident';
     const user = await User.create({
+      username: normalizedUsername,
       name: name || normalizedEmail.split('@')[0],
       email: normalizedEmail,
       passwordHash,
       phone: phone || '',
-      role: ['admin','owner','resident'].includes(userRole) ? userRole : 'resident',
+      role: ['admin', 'owner', 'resident'].includes(userRole) ? userRole : 'resident',
       profile: {
         name: name || normalizedEmail.split('@')[0],
         email: normalizedEmail,
@@ -34,13 +65,17 @@ export const signup = async (req, res) => {
         address: '',
         description: '',
       },
+      profileData: profileData || {},
+      favorites: [],
+      preferences: preferences || {},
       createdAt: new Date(),
       updatedAt: new Date(),
     });
 
-    const token = jwt.sign({ id: user._id.toString(), email: user.email, name: user.name, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    const tokenPayload = { userId: user._id.toString(), id: user._id.toString(), email: user.email, name: user.name, role: user.role };
+    const token = jwt.sign(tokenPayload, getJwtSecret(), { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
+    const safeUser = normalizeUserDocument(user);
 
-    // Notify admin of new signup (non-blocking)
     try {
       await logAdminAction({
         adminId: 'system',
@@ -57,7 +92,13 @@ export const signup = async (req, res) => {
       console.warn('Signup notification failed:', e && e.message ? e.message : e);
     }
 
-    return res.status(201).json({ success: true, data: { user: { id: user._id, name: user.name, email: user.email, role: user.role }, token } });
+    return res.status(201).json({
+      success: true,
+      message: 'Account created successfully.',
+      token,
+      user: safeUser,
+      data: { token, user: safeUser },
+    });
   } catch (error) {
     console.error('Signup error', error);
     return res.status(500).json({ success: false, message: 'Unable to create account.' });
@@ -66,27 +107,36 @@ export const signup = async (req, res) => {
 
 export const login = async (req, res) => {
   try {
-    const { email, password } = req.body || {};
-    if (!email || !password) return res.status(400).json({ success: false, message: 'Email and password are required.' });
+    const { email, username, password } = req.body || {};
+    const identifier = (email ?? username ?? '').toString().trim();
 
-    const normalizedEmail = String(email || '').trim().toLowerCase();
+    if (!identifier || !password) {
+      return res.status(400).json({ success: false, message: 'Email/username and password are required.' });
+    }
+
+    const normalizedIdentifier = identifier.toLowerCase();
     const emailRegex = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+    const userFilter = emailRegex.test(normalizedIdentifier)
+      ? { email: normalizedIdentifier }
+      : { $or: [{ username: normalizedIdentifier }, { email: normalizedIdentifier }] };
 
-    if (!emailRegex.test(normalizedEmail)) {
-      return res.status(401).json({ success: false, message: 'Email is incorrect. Please enter a valid email address.' });
-    }
-
-    const user = await User.findOne({ email: normalizedEmail }).select('+passwordHash');
+    const user = await User.findOne(userFilter).select('+passwordHash');
     if (!user) {
-      return res.status(401).json({ success: false, message: 'Email is incorrect. Please check your email.' });
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
-    const match = await user.comparePassword(password);
+    const match = await user.comparePassword(String(password));
     if (!match) {
-      return res.status(401).json({ success: false, message: 'Password is incorrect. Please try again.' });
+      return res.status(401).json({ success: false, message: 'Invalid email or password' });
     }
 
-    const token = jwt.sign({ id: user._id.toString(), email: user.email, name: user.name, role: user.role }, JWT_SECRET, { expiresIn: '7d' });
+    user.lastLoginAt = new Date();
+    user.updatedAt = new Date();
+    await user.save();
+
+    const tokenPayload = { userId: user._id.toString(), id: user._id.toString(), email: user.email, name: user.name, role: user.role };
+    const token = jwt.sign(tokenPayload, getJwtSecret(), { expiresIn: process.env.JWT_EXPIRES_IN || '7d' });
+    const safeUser = normalizeUserDocument(user);
 
     try {
       await logAdminAction({
@@ -104,7 +154,13 @@ export const login = async (req, res) => {
       console.warn('Login notification failed:', e && e.message ? e.message : e);
     }
 
-    return res.json({ success: true, data: { user: { id: user._id, name:user.name, email: user.email, role: user.role }, token } });
+    return res.json({
+      success: true,
+      message: 'Login successful',
+      token,
+      user: safeUser,
+      data: { token, user: safeUser },
+    });
   } catch (error) {
     console.error('Login error', error);
     return res.status(500).json({ success: false, message: 'Unable to login.' });
@@ -114,9 +170,10 @@ export const login = async (req, res) => {
 export const me = async (req, res) => {
   try {
     if (!req.user) return res.status(401).json({ success: false, message: 'Not authenticated.' });
-    const user = await User.findById(req.user.id).select('-passwordHash').lean();
+    const userId = req.user.userId || req.user.id || req.user._id;
+    const user = await User.findById(userId).select('-passwordHash').lean();
     if (!user) return res.status(404).json({ success: false, message: 'User not found.' });
-    return res.json({ success: true, data: user });
+    return res.json({ success: true, data: normalizeUserDocument(user) });
   } catch (error) {
     console.error('Me error', error);
     return res.status(500).json({ success: false, message: 'Unable to fetch user.' });

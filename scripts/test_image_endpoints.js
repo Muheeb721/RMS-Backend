@@ -24,7 +24,7 @@ async function run() {
     const imgPath = path.join(process.cwd(), 'public', 'images', 'demos', 'house-001-cover.svg');
     console.log('Uploading image from', imgPath);
     const fd = new FormData();
-    fd.append('image', fs.createReadStream(imgPath));
+    fd.append('image', new Blob([await fs.promises.readFile(imgPath)], { type: 'image/png' }), 'house-001-cover.png');
     const upRes = await fetch(`${BASE}/api/properties/${propId}/images`, { method: 'POST', headers, body: fd });
     const upJson = await upRes.json();
     if (!upRes.ok) throw new Error(`Upload failed: ${upJson.message || JSON.stringify(upJson)}`);
@@ -34,7 +34,7 @@ async function run() {
     const img2Path = path.join(process.cwd(), 'public', 'images', 'demos', 'house-001-img2.svg');
     console.log('Replacing image 0 with', img2Path);
     const fd2 = new FormData();
-    fd2.append('image', fs.createReadStream(img2Path));
+    fd2.append('image', new Blob([await fs.promises.readFile(img2Path)], { type: 'image/png' }), 'house-001-img2.png');
     const repRes = await fetch(`${BASE}/api/properties/${propId}/images/0`, { method: 'POST', headers, body: fd2 });
     const repJson = await repRes.json();
     if (!repRes.ok) throw new Error(`Replace failed: ${repJson.message || JSON.stringify(repJson)}`);

@@ -1,5 +1,8 @@
 import RentalProfile from '../models/RentalProfile.js';
-import { sendProfileCompletedEmail } from '../services/emailService.js';
+import User from '../models/User.js';
+import mongoose from 'mongoose';
+import { sendProfileCompletedEmail, sendRentalDetailsEmails } from '../services/emailService.js';
+import { createAdminNotification, logAdminAction } from '../services/activityService.js';
 
 const addMonths = (date, months) => {
   if (!date) return null;
@@ -12,7 +15,7 @@ export const createRentalProfile = async (req, res) => {
   try {
     const body = req.body || {};
     const user = req.user || {};
-    const userId = String(body.userId || user.id || user._id || '').trim();
+    const userId = String(user.id || user.userId || user._id || '').trim();
     const required = [
       body.fullName,
       body.email,
@@ -30,12 +33,14 @@ export const createRentalProfile = async (req, res) => {
       });
     }
 
+    const existing = await RentalProfile.findOne({ userId }).lean();
     const payload = {
       userId,
       fullName: String(body.fullName).trim(),
       email: String(body.email).trim(),
       phone: String(body.phone).trim(),
-      profileImage: typeof body.profileImage === 'string' ? body.profileImage.trim() : (body.profileImage || ''),
+      profileImage: typeof body.profileImage === 'string' ? body.profileImage.trim() : (body.profileImage || existing?.profileImage || ''),
+      cnicImage: typeof body.cnicImage === 'string' ? body.cnicImage.trim() : (body.cnicImage || existing?.cnicImage || ''),
       dateOfBirth: body.dateOfBirth ? new Date(body.dateOfBirth) : null,
       gender: body.gender || '',
       currentAddress: String(body.currentAddress).trim(),
@@ -63,10 +68,38 @@ export const createRentalProfile = async (req, res) => {
       notes: body.notes || '',
     };
 
-    const existing = await RentalProfile.findOne({ userId }).lean();
     const record = existing
       ? await RentalProfile.findByIdAndUpdate(existing._id, payload, { new: true, runValidators: true }).lean()
       : await RentalProfile.create(payload);
+
+    if (mongoose.Types.ObjectId.isValid(userId)) {
+      await User.findByIdAndUpdate(userId, {
+        hasRentalProfile: true,
+        profileImage: record.profileImage || '',
+        phone: record.phone || '',
+        profile: {
+          fullName: record.fullName,
+          email: record.email,
+          phone: record.phone,
+          currentAddress: record.currentAddress,
+          profileImage: record.profileImage || '',
+          cnicImage: record.cnicImage || '',
+        },
+        updatedAt: new Date(),
+      });
+    }
+
+    if (!existing) {
+      await createAdminNotification({
+        actionType: 'RENTAL_PROFILE_SUBMITTED',
+        entityType: 'RENTAL',
+        entityId: record._id.toString(),
+        userId: record.userId,
+        userName: record.fullName,
+        title: 'Rental profile submitted',
+        message: `${record.fullName} submitted a rental profile for ${record.propertyName || 'a property'}.`,
+      });
+    }
 
     if (record.rentalStartDate && record.rentalDurationMonths > 0) {
       const next = addMonths(record.rentalStartDate, 1);
@@ -74,7 +107,7 @@ export const createRentalProfile = async (req, res) => {
     }
 
     try {
-      if (record.email && record.fullName) {
+      if (!existing && record.email && record.fullName) {
         await sendProfileCompletedEmail({
           userName: record.fullName,
           userEmail: record.email,
@@ -172,8 +205,32 @@ export const changeRentalStatus = async (req, res) => {
     const { status } = req.body || {};
     if (!id) return res.status(400).json({ success: false, message: 'Profile id required.' });
     if (!status) return res.status(400).json({ success: false, message: 'Status is required.' });
+    const previous = await RentalProfile.findById(id).lean();
+    if (!previous) return res.status(404).json({ success: false, message: 'Profile not found.' });
     const rec = await RentalProfile.findByIdAndUpdate(id, { status, updatedAt: new Date() }, { new: true }).lean();
     if (!rec) return res.status(404).json({ success: false, message: 'Profile not found.' });
+
+    await logAdminAction({
+      adminId: req.user?.id || req.user?._id || 'admin',
+      adminName: req.user?.name || 'Admin',
+      adminEmail: req.user?.email || '',
+      userId: rec.userId,
+      userName: rec.fullName,
+      actionType: 'RENTAL_STATUS_CHANGED',
+      entityType: 'RENTAL',
+      entityId: String(rec._id),
+      previousStatus: previous.status || '',
+      newStatus: rec.status,
+      message: `Your rental request for ${rec.propertyName || 'the property'} status changed to ${rec.status}.`,
+      propertyName: rec.propertyName || '',
+    });
+    try {
+      const deliveries = await sendRentalDetailsEmails({ rental: rec, status: rec.status, eventType: `status-${String(rec.status).toLowerCase()}` });
+      deliveries.filter((delivery) => !delivery.success).forEach((delivery) => console.warn('Rental status email was not delivered:', delivery.message));
+    } catch (emailError) {
+      console.warn('Rental status email failed:', emailError?.message || emailError);
+    }
+
     return res.json({ success: true, data: rec });
   } catch (error) {
     console.error('Change rental status failed', error);

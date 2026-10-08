@@ -1,23 +1,22 @@
 export const handlemessage = async (req, res) => {
   try {
-    const { message } = req.body;
+    const { message, session_id } = req.body;
 
-    let ai;
-    try {
-      const mod = await import('@google/GenI.js');
-      const { googleGenI } = mod;
-      ai = googleGenI({ apiKey: process.env.GENI_API_KEY });
-    } catch (importErr) {
-      console.warn('GenI client not available:', importErr.message || importErr);
-      res.status(503).json({ success: false, message: 'AI service not configured.' });
-      return;
+    const response = await fetch('http://127.0.0.1:8000/chat', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        session_id: session_id || 'default-session',
+        message: message,
+      }),
+    });
+
+    if (!response.ok) {
+      throw new Error(`Backend responded with status ${response.status}`);
     }
 
-    const response = await ai.models.generatecontent({
-      model: 'gemini-1.5-flash',
-      contents: message,
-    });
-    res.json({ reply: response.text });
+    const data = await response.json();
+    res.json({ reply: data.reply });
   } catch (error) {
     console.error('Chatbot message handling failed', error);
     res.status(500).json({ success: false, message: 'Unable to process chatbot message.' });

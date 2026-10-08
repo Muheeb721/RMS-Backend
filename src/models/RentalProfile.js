@@ -6,6 +6,7 @@ const rentalProfileSchema = new mongoose.Schema({
   email: { type: String, required: true },
   phone: { type: String, default: '' },
   profileImage: { type: String, default: '' },
+  cnicImage: { type: String, default: '' },
   dateOfBirth: { type: Date, default: null },
   gender: { type: String, default: '' },
   currentAddress: { type: String, default: '' },

@@ -8,13 +8,14 @@
     "dev": "node --watch src/server.js",
     "start": "node src/server.js",
     "test": "node --test",
-    "backup": "node scripts/backup_collections.js"
+    "backup": "node scripts/backup_collections.js",
+    "seed:rent-showcase": "node scripts/seed-rental-showcase.js"
   },
   "dependencies": {
     "bcryptjs": "^2.4.3",
-    "cors": "^2.8.5",
-    "dotenv": "^16.4.1",
     "cloudinary": "^1.37.0",
+    "cors": "^2.8.5",
+    "dotenv": "^16.6.1",
     "express": "^4.21.2",
     "express-fileupload": "^1.4.0",
     "jsonwebtoken": "^9.0.2",
@@ -22,6 +23,9 @@
     "mongoose": "^8.8.2",
     "morgan": "^1.10.0",
     "multer": "^2.4.0",
-    "nodemailer": "^7.0.0"
+    "node-cron": "^4.6.0",
+    "nodemailer": "^7.0.0",
+    "pdfkit": "^0.20.2",
+    "socket.io": "^4.8.3"
   }
 }

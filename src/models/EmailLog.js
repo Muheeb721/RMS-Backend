@@ -5,7 +5,7 @@ const emailLogSchema = new mongoose.Schema({
   email: { type: String, required: true, index: true },
   type: {
     type: String,
-    enum: ['PROFILE_COMPLETED', 'BOOKING_SUBMITTED', 'BOOKING_APPROVED', 'BOOKING_REJECTED'],
+    enum: ['PROFILE_COMPLETED', 'BOOKING_SUBMITTED', 'BOOKING_APPROVED', 'BOOKING_REJECTED', 'ADMIN_BOOKING_SUBMITTED', 'ADMIN_PASSWORD_RESET_OTP'],
     required: true,
     index: true,
   },

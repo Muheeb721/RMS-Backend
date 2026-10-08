@@ -1,22 +1,41 @@
 import fs from 'fs';
 import path from 'path';
+import { fileURLToPath } from 'url';
 import Property, { normalizePropertyImages } from '../models/Property.js';
+import cloudinaryService from '../services/cloudinaryService.js';
 
 const getStoredImagePath = (imageUrl) => {
   if (!imageUrl || typeof imageUrl !== 'string') return null;
-  const clean = imageUrl.replace(/^\/+/, '').replace(/^[A-Za-z]+:\/\//, '');
-  if (!clean || !clean.startsWith('images/')) return null;
-  return path.join(process.cwd(), 'Backend', 'public', clean);
+  const clean = imageUrl.split('?')[0].replace(/^\/+/, '').replace(/^[A-Za-z]+:\/\//, '');
+  if (!clean || !(clean.startsWith('images/') || clean.startsWith('uploads/'))) return null;
+  const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+  const publicRoot = path.resolve(backendRoot, 'public');
+  const resolved = path.resolve(publicRoot, clean);
+  return resolved.startsWith(`${publicRoot}${path.sep}`) ? resolved : null;
 };
 
 const deletePropertyMediaFiles = async (property) => {
   if (!property) return;
   const candidates = [];
+  const handledAssets = new Set();
 
-  if (property.image) candidates.push(property.image);
+  if (property.image) candidates.push({ url: property.image, public_id: property.featuredImage?.public_id || '' });
+  if (property.featuredImage?.url) candidates.push(property.featuredImage);
   if (Array.isArray(property.images)) candidates.push(...property.images);
 
-  for (const imageUrl of candidates) {
+  for (const image of candidates) {
+    const imageUrl = typeof image === 'string' ? image : image?.url;
+    const publicId = typeof image === 'object' ? image.public_id : '';
+    const assetKey = publicId || imageUrl;
+    if (!assetKey || handledAssets.has(assetKey)) continue;
+    handledAssets.add(assetKey);
+    if (publicId) {
+      try {
+        await cloudinaryService.deleteByPublicId(publicId);
+      } catch (error) {
+        console.warn('Unable to remove property image from Cloudinary:', error?.message || error);
+      }
+    }
     const filePath = getStoredImagePath(imageUrl);
     if (!filePath) continue;
     try {
@@ -142,24 +161,69 @@ export const calculateOfferPrice = (price, discountPercent = 0) => {
 };
 
 export const createProperty = async (req, res) => {
+  const savedUploads = [];
   try {
     const input = req.body || {};
+    if (!String(input.title || '').trim()) {
+      return res.status(400).json({ success: false, message: 'Property title is required.' });
+    }
+    const propertyType = String(input.propertyType || input.type || input.category || '').trim();
+    if (!['house', 'apartment', 'flat', 'room', 'hostel'].includes(propertyType.toLowerCase())) {
+      return res.status(400).json({ success: false, message: 'Property category must be House, Apartment, Flat, Room, or Hostel.' });
+    }
+    const monthlyPrice = Number(input.rent || input.price || 0);
+    if (!Number.isFinite(monthlyPrice) || monthlyPrice <= 0) {
+      return res.status(400).json({ success: false, message: 'Monthly rent must be greater than zero.' });
+    }
+    const files = Array.isArray(req.files) ? req.files : [];
+    const allowedTypes = ['image/jpeg', 'image/jpg', 'image/png', 'image/webp'];
+    const maxBytes = Number(process.env.UPLOAD_MAX_SIZE) || 5 * 1024 * 1024;
+    for (const file of files) {
+      if (!allowedTypes.includes(String(file.mimetype || '').toLowerCase())) {
+        return res.status(400).json({ success: false, message: 'Invalid image type. Only JPEG, PNG and WEBP are allowed.' });
+      }
+      if (file.size > maxBytes) {
+        return res.status(400).json({ success: false, message: `Each image must be no larger than ${Math.round(maxBytes / 1024 / 1024)}MB.` });
+      }
+    }
+
+    const uploadedImages = await Promise.all(files.map(async (file) => {
+      if (cloudinaryService?.isConfigured?.()) {
+        const uploaded = await cloudinaryService.uploadBuffer(file.buffer, { folder: 'properties' });
+        const image = { url: uploaded.url, public_id: uploaded.public_id || '' };
+        savedUploads.push(image);
+        return image;
+      }
+
+      const backendRoot = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../..');
+      const imagesDir = path.join(backendRoot, 'public', 'uploads', 'properties');
+      await fs.promises.mkdir(imagesDir, { recursive: true });
+      const extension = path.extname(file.originalname || '').toLowerCase();
+      const filename = `${Date.now()}-${Math.random().toString(16).slice(2)}${extension}`;
+      const imagePath = path.join(imagesDir, filename);
+      await fs.promises.writeFile(imagePath, file.buffer);
+      const image = { url: `/uploads/properties/${filename}`, public_id: '' };
+      savedUploads.push(image);
+      return image;
+    }));
+
     const normalizedImages = normalizePropertyImages(
-      Array.isArray(input.images) ? input.images : (input.image ? [input.image] : []),
-      input.featuredImage?.url || input.image || ''
+      [...uploadedImages, ...(Array.isArray(input.images) ? input.images : (input.image ? [input.image] : []))],
+      uploadedImages[0]?.url || input.featuredImage?.url || input.image || ''
     );
 
     const normalized = {
       ...input,
-      purpose: input.purpose || input.transactionType || 'Sale',
+      purpose: input.purpose || input.transactionType || 'Rent',
       propertyType: input.propertyType || input.type || 'House',
       type: input.type || input.propertyType || 'House',
-      transactionType: input.transactionType || input.purpose || 'Sale',
+      transactionType: input.transactionType || input.purpose || 'Rent',
+      listingType: 'rent',
       status: normalizePropertyStatus(input.status),
       availability: input.availability || normalizePropertyStatus(input.status),
-      price: Number(input.price || input.salePrice || 0),
-      salePrice: Number(input.salePrice || input.price || 0),
-      rent: Number(input.rent || 0),
+      price: monthlyPrice,
+      salePrice: 0,
+      rent: monthlyPrice,
       images: normalizedImages.images,
       image: normalizedImages.image,
       featuredImage: normalizedImages.featuredImage,
@@ -180,6 +244,20 @@ export const createProperty = async (req, res) => {
     const prop = await Property.create(normalized);
     return res.status(201).json({ success: true, data: prop });
   } catch (error) {
+    for (const image of savedUploads) {
+      if (image.public_id) {
+        try { await cloudinaryService.deleteByPublicId(image.public_id); } catch (cleanupError) {
+          console.warn('Failed to clean up uploaded property image:', cleanupError?.message || cleanupError);
+        }
+      } else {
+        const filePath = getStoredImagePath(image.url);
+        if (filePath) {
+          try { await fs.promises.unlink(filePath); } catch (cleanupError) {
+            if (cleanupError.code !== 'ENOENT') console.warn('Failed to clean up uploaded property image:', cleanupError?.message || cleanupError);
+          }
+        }
+      }
+    }
     console.error('Create property failed', error);
     return res.status(500).json({ success: false, message: 'Unable to create property.' });
   }
@@ -187,7 +265,7 @@ export const createProperty = async (req, res) => {
 
 export const listProperties = async (req, res) => {
   try {
-    const { q, type, status, city, minPrice, maxPrice, budget, limit = 20, page = 1 } = req.query || {};
+    const { q, type, status, city, minPrice, maxPrice, budget, limit = 1000, page = 1 } = req.query || {};
     const filter = {};
     if (q) filter.$or = [{ title: new RegExp(q, 'i') }, { description: new RegExp(q, 'i') }, { location: new RegExp(q, 'i') }];
     if (type) filter.$or = [{ propertyType: type }, { type }];
@@ -245,13 +323,128 @@ export const getProperty = async (req, res) => {
 export const updateProperty = async (req, res) => {
   try {
     const { id } = req.params;
-    const updates = req.body || {};
+    const body = req.body || {};
+    const editableFields = [
+      'title',
+      'description',
+      'propertyType',
+      'type',
+      'category',
+      'purpose',
+      'transactionType',
+      'price',
+      'rent',
+      'salePrice',
+      'listingType',
+      'location',
+      'city',
+      'society',
+      'phase',
+      'block',
+      'address',
+      'bedrooms',
+      'bathrooms',
+      'area',
+      'furnished',
+      'amenities',
+      'ownerName',
+      'ownerPhone',
+      'ownerEmail',
+      'managerName',
+      'deposit',
+      'otherCharges',
+      'floor',
+      'totalFloors',
+      'priceHistory',
+      'images',
+      'image',
+      'featuredImage',
+      'videos',
+      'media3d',
+      'status',
+      'availability',
+      'offer',
+      'offerEnabled',
+      'discountPercent',
+      'isFeatured',
+    ];
+    const updates = Object.fromEntries(
+      editableFields
+        .filter((field) => Object.prototype.hasOwnProperty.call(body, field))
+        .map((field) => [field, body[field]])
+    );
+
+    if (typeof updates.title === 'string') updates.title = updates.title.trim();
+    if (Object.prototype.hasOwnProperty.call(body, 'title') && !updates.title) {
+      return res.status(400).json({ success: false, message: 'Property title is required.' });
+    }
+
     if (updates.status) updates.status = normalizePropertyStatus(updates.status);
     if (updates.availability) updates.availability = normalizePropertyStatus(updates.availability);
-    if (updates.price || updates.salePrice) {
-      updates.price = Number(updates.price || updates.salePrice || 0);
-      updates.salePrice = Number(updates.salePrice || updates.price || 0);
+    const rentalFieldsChanged = [
+      'propertyType',
+      'type',
+      'category',
+      'transactionType',
+      'purpose',
+      'listingType',
+      'price',
+      'rent',
+      'salePrice',
+    ].some((field) => Object.prototype.hasOwnProperty.call(updates, field));
+    if (rentalFieldsChanged) {
+      updates.listingType = 'rent';
+      updates.transactionType = 'Rent';
+      updates.purpose = 'Rent';
+      updates.salePrice = 0;
+      if (Object.prototype.hasOwnProperty.call(updates, 'price') || Object.prototype.hasOwnProperty.call(updates, 'rent')) {
+        const monthlyRent = Number(updates.rent ?? updates.price);
+        updates.price = monthlyRent;
+        updates.rent = monthlyRent;
+      }
     }
+
+    for (const field of ['price', 'rent', 'salePrice', 'bedrooms', 'bathrooms', 'area', 'discountPercent']) {
+      if (Object.prototype.hasOwnProperty.call(updates, field)) {
+        const numericValue = Number(updates[field]);
+        if (!Number.isFinite(numericValue) || numericValue < 0) {
+          return res.status(400).json({ success: false, message: `${field} must be a non-negative number.` });
+        }
+        updates[field] = numericValue;
+      }
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'images')) {
+      if (!Array.isArray(updates.images)) {
+        return res.status(400).json({ success: false, message: 'images must be an array.' });
+      }
+    }
+
+    if (Array.isArray(updates.images) && updates.images.length > 0) {
+      const normalizedImages = normalizePropertyImages(updates.images, updates.image || '');
+      updates.images = normalizedImages.images;
+      if (!Object.prototype.hasOwnProperty.call(updates, 'image')) {
+        updates.image = normalizedImages.image;
+      }
+      if (!Object.prototype.hasOwnProperty.call(updates, 'featuredImage')) {
+        updates.featuredImage = normalizedImages.featuredImage;
+      }
+    }
+
+    if (Array.isArray(updates.images) && updates.images.length === 0) {
+      delete updates.images;
+      delete updates.image;
+      delete updates.featuredImage;
+    }
+    if (!Object.prototype.hasOwnProperty.call(updates, 'images')) {
+      delete updates.image;
+      delete updates.featuredImage;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(updates, 'image') && typeof updates.image !== 'string') {
+      return res.status(400).json({ success: false, message: 'image must be a string URL.' });
+    }
+
     if (updates.offerEnabled && Number(updates.discountPercent || 0) > 0) {
       updates.offer = {
         discountPercent: Number(updates.discountPercent || 0),
@@ -264,7 +457,11 @@ export const updateProperty = async (req, res) => {
     if (updates.media3d && !Array.isArray(updates.media3d)) updates.media3d = [updates.media3d];
     updates.updatedAt = new Date();
 
-    const prop = await Property.findByIdAndUpdate(id, updates, { new: true }).lean();
+    const prop = await Property.findByIdAndUpdate(
+      id,
+      { $set: updates },
+      { new: true, runValidators: true, context: 'query' }
+    ).lean();
     if (!prop) return res.status(404).json({ success: false, message: 'Property not found.' });
     return res.json({ success: true, data: prop });
   } catch (error) {
